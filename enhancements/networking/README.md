@@ -1,7 +1,7 @@
 ---
-title: Fulfilment Services Networking
+title: OSAC Networking API
 authors:
-  - jkary@redhat.com
+  - agentil@redhat.com
 creation-date: 2025-11-29
 last-updated: yyyy-mm-dd
 tracking-link: # link to the tracking ticket (for example: Github issue) that corresponds to this enhancement
@@ -13,377 +13,695 @@ replaces:
 superseded-by:
   - N/A
 ---
-1. **Fill out the "overview" sections.** This includes the Summary and
-   Motivation sections. These should be easy and explain why the community
-   should desire this enhancement.
-1. **Create a PR.** Assign it to folks with expertise in that domain to help
-   sponsor the process.
-1. **Merge after reaching consensus.** Merge when there is consensus
-   that the design is complete and all reviewer questions have been
-   answered so that work can begin.  Come back and update the document
-   if important details (API field names, workflow, etc.) change
-   during code review.
-1. **Keep all required headers.** If a section does not apply to an
-   enhancement, explain why but do not remove the section. This part
-   of the process is enforced by the linter CI job.
 
-See ../README.md for background behind these instructions.
-
-Start by filling out the header with the metadata for this enhancement.
-
-# networking for fulfillment services
+# OSAC Networking API
 
 ## Summary
 
-In the current version of fulfillment-services, networking of clusters, hosts and VMs is
-done using the standard cluster network IPs.  This proposal seeks to expand this to
-offer through User Defined Networking (UDN) services in the latest versions of OpenShift. 
+This enhancement introduces a Networking API for OSAC fulfillment services. The
+API provides familiar cloud networking primitives (VirtualNetwork, Subnet,
+SecurityGroup, PublicIP) as first-class resources that tenants can define and
+manage independently. The implementation leverages OpenShift User Defined
+Networks (UDN) through a pluggable NetworkClass architecture, enabling providers
+to offer different networking capabilities based on their infrastructure.
 
-The use of UDN provides primary network capabilities including L2, L3 and Localnet
-connections.  UDNs are isolated to namespaces providing both security and network
-addressing overlap between tenants.
+The Networking API is designed as a foundational service for OSAC, intended to
+be consumed by multiple services. **Compute Instance (VMaaS) will be the first
+service to integrate with this API**, with Cluster-as-a-Service and
+BareMetal-as-a-Service planned for future integration.
 
-The fulfillment service will provide this capability through networking templates which
-operate similarly to other templates.  If permitted by the administrator, the end-user
-can provision their own networks within and between different components of the service.
-Ultimate control of how the networking is accomplished is left up to the organization
-admin through the ability to define custom Ansible roles.
+## Terminology
 
+This section defines the key networking terms used throughout this enhancement:
+
+- **Region**: A user-facing abstraction representing a geographic or logical
+  grouping of infrastructure. In OSAC, a Region maps to an internal "Hub" (a
+  managed OpenShift cluster). VirtualNetworks and PublicIPs are scoped to a
+  specific Region.
+
+- **VirtualNetwork**: A tenant's isolated virtual network environment, similar
+  to an AWS VPC or Azure VNet. Provides logical isolation and defines the
+  overall address space (CIDR) for a tenant's network resources within a region.
+
+- **Subnet**: A subdivision of a VirtualNetwork's IP address space. Resources
+  are attached to Subnets to receive IP addresses and network connectivity.
+
+- **SecurityGroup**: A stateful firewall that controls inbound and outbound
+  traffic for resources. Rules specify allowed protocols, ports, and source/
+  destination addresses. SecurityGroups are applied to resources within a
+  VirtualNetwork.
+
+- **PublicIP** (also known as **Floating IP**): A public IPv4 address allocated
+  from provider-managed pools that can be dynamically attached to and detached
+  from resources. PublicIPs persist independently of the resources they're
+  attached to, allowing tenants to reassign them as needed.
+
+- **PublicIPAttachment**: The binding between a PublicIP and a target resource.
+  Creating an attachment routes traffic to the resource; deleting it removes the
+  association without releasing the IP.
+
+- **NetworkClass**: A provider-defined resource that specifies how
+  VirtualNetworks are implemented. Enables pluggable networking backends (e.g.,
+  `tenant-isolated` for basic UDN, `fabric-integrated` for advanced topologies).
 
 ## Motivation
-In the fulfillment services solution there is a need to manage various aspects of
-networking. The goal is to provide networking services through curated templates
-allowing for connections between various resources within a tenant.  Inspiration on how
-to create these networks has been taken from the general concepts of network management
-in the cloud.  Each hyperscaler (cloud vendor) has approached networking differently,
-however the following categories remain the same:
 
-1. VPC (Virtual Private Cloud)
-2. Subnets
-3. Security Rules
-4. Routing
-5. Gateways 
-6. NAT
+OSAC needs a unified networking layer that provides tenants with the ability to
+define and manage their network topology. By introducing networking as a
+standalone API with first-class resources, we align with how major cloud
+providers (AWS, Azure, GCP) approach networking.
 
-This document will provide definitions and recommendations for handling each of these
-areas and describe how it fits with each of the user stories.
+This familiar model allows users to:
 
-Feature creation should be staged in the following order:
+1.  Define their network topology before provisioning workloads
+2.  Reference pre-existing networks when provisioning resources
+3.  Manage security policies centrally through SecurityGroups that can be
+    applied across multiple resources
+4.  Create isolated network segments for different workloads or environments
 
-1. Network entities (Subnets, IP management, Network Type, Network Protocols, Security Rules)
-2. Intra-networking (Local Routing, Load Balancing, SNAT)
-3. Inter-networking (Firewalls, Transit Gateways, Regions, Exterior Network Protocols)
-
-The end result will be the extension of the Fulfillment Service API for managing
-networks.  This API will allow for the definition and management of networking functions
-across the various other services.
-
-This document excludes handling storage networks and AI networks.  
+The Networking API is designed with extensibility and reuse as core principles.
+It provides a consistent networking experience that can be leveraged by any OSAC
+service requiring network connectivity, starting with Compute Instance and
+extending to Cluster-as-a-Service and BareMetal-as-a-Service
 
 ### User Stories
 
-#### Provider Stories
-- As a provider, I want to be able to control what networks/networking is available and
-expose this through a template.  This will give the users the ability to manage their
-own networking in an approved way.
-- As a provider, I want to allow tenants to create/connect networks own by said
-tenant.  This will allow tenants to provision their own networks. 
-- As a provider, I want to support for IPv4/IPv6 networks.
-- As a provider, I want control the services provided to the tenant network which includes:
-  - SNAT
-  - Gateways
-  - Egress IPs
-  - Exposed Ports
-  - Firewall Rules
-  - Intra-networking between tenants
-  - DHCP
-  - DNS
-- As an provider, I want to have networks advertised through BGP.
-
-
 #### End User Stories
-- As an end-user, I want to request a network from a list of network templates.
-- As an end-user, I want to connect/edit a cluster, host or VM's network definition.
-- As an end-user, I want to create/edit the security rules for a network. 
-- As an end-user, I want to control which intranets can communicate and the ports
-allowed.
 
+- As an end-user, I want to be able to create one or several VirtualNetworks
+  that are isolated from each other
+- As an end-user, I want to be able to define a Subnet in my VirtualNetwork
+- As an end-user, I want to be able to define SecurityGroups to control traffic
+  to resources in my VirtualNetwork
+- As an end-user, I want to be able to attach resources to a Subnet in one of my
+  VirtualNetworks
+- As an end-user, I want to allocate a Public IP in a region
+- As an end-user, I want to attach and detach a Public IP to a resource
+
+#### Provider Stories
+
+- As a service provider, I want to be able to provide my own implementation of
+  the Networking API through NetworkClasses
+- As a service provider, I want to control which networking capabilities are
+  available to tenants
 
 ### Goals
 
+- Introduce a Networking API as a foundational OSAC service with VirtualNetwork,
+  Subnet, SecurityGroup, PublicIP, and PublicIPAttachment as first-class
+  resources
+- Design the API to be generic and reusable across all OSAC services (Compute
+  Instance, Cluster-as-a-Service, BareMetal-as-a-Service)
+- Implement a pluggable architecture (NetworkClass) that allows providers to
+  offer different networking implementations
+- Deliver initial integration with Compute Instance service as the first
+  consumer of the Networking API
+- Provide a first NetworkClass implementation (`tenant-isolated`) based on
+  OpenShift User Defined Networks (UDN)
 
 ### Non-Goals
 
-1. Storage Networking
-2. Infiniband Networking (Including ROCEv2)
+- Storage Networking
+- Integration with Cluster-as-a-Service and BareMetal-as-a-Service (planned for
+  future enhancements)
+- APIs for NAT Gateways, Internet Gateways, and Load Balancers
+- Provider-side IP pool management (defining CIDR ranges, quotas, BYOIP)
 
 ## Proposal
 
-This section should explain what the proposal actually is. Enumerate
-*all* of the proposed changes at a *high level*, including all of the
-components that need to be modified and how they will be
-different. Include the reason for each choice in the design and
-implementation that is proposed here.
+This proposal relies on User Defined Networks (UDN), a networking feature
+provided by OpenShift that enables the creation of isolated networks within an
+OpenShift cluster. UDN leverages OVN-Kubernetes to provide network isolation.
 
-To keep this section succinct, document the details like API field
-changes, new images, and other implementation details in the
-**Implementation Details** section and record the reasons for not
-choosing alternatives in the **Alternatives** section at the end of
-the document.
+Because UDN is local to an OpenShift cluster, a Virtual Network must be tied to
+a specific Hub in the OSAC architecture. A Hub represents a managed OpenShift
+cluster that hosts tenant workloads and their associated network resources.
+Since "Hub" is an internal OSAC concept not exposed to end-users, we propose to
+present this as a **Region** in the user-facing API. This aligns with how other
+cloud providers expose geographic or logical groupings of infrastructure, making
+the model intuitive for users familiar with public cloud networking.
+
+### NetworkClass
+
+Different deployment scenarios may require different networking implementations.
+For example, a basic deployment might use standalone UDN for simple tenant
+isolation, while an advanced deployment could integrate with the underlying
+network fabric to provide additional capabilities like multiple subnets,
+external connectivity, or VLAN integration.
+
+To accommodate this variability, we introduce the concept of
+**NetworkClass**---a provider-defined resource that specifies how Virtual
+Networks are implemented. This follows the same pattern as Kubernetes
+`StorageClass` or `IngressClass`, where:
+
+- **Providers** define available NetworkClasses with their capabilities and
+  implementation details
+- **Tenants** select a NetworkClass when creating a Virtual Network (or use the
+  default)
+- **Controllers** reconcile Virtual Networks based on the selected NetworkClass
+
+This design ensures the networking API remains stable and user-friendly while
+allowing providers to plug in different implementations as needed.
+
+#### NetworkClass: `tenant-isolated`
+
+This enhancement defines a single NetworkClass called `tenant-isolated`. This
+class provides:
+
+- **Isolated tenant networking**: Each Virtual Network is fully isolated from
+  other tenants using OVN-Kubernetes
+- **Single subnet per Virtual Network**: Due to UDN architecture constraints,
+  each Virtual Network contains exactly one subnet
+- **Layer 2 connectivity**: VMs within the same Virtual Network can communicate
+  at Layer 2
+
+The `tenant-isolated` class is suitable for deployments where:
+
+- Tenants need simple, isolated networks for their workloads
+- No integration with external network infrastructure is required
+- Each logical network segment can be represented as a separate Virtual Network
+
+Future enhancements may introduce additional NetworkClasses (e.g.,
+`fabric-integrated`) that leverage UDN Localnet mode to provide multi-subnet
+VirtualNetworks, external connectivity, and tighter integration with physical
+network infrastructure.
+
+The Networking API introduces a cloud-like abstraction layer built on
+OpenShift's User Defined Networking (UDN). This design provides tenants with
+familiar networking primitives while allowing providers to maintain control over
+network configurations through NetworkClasses.
+
+The proposal relies on the following core concepts:
+
+- **NetworkClass**: A provider-defined resource that specifies how Virtual
+  Networks are implemented. Different NetworkClasses enable different networking
+  capabilities (e.g., single-subnet isolated networks vs. multi-subnet
+  fabric-integrated networks). Tenants select a NetworkClass when creating a
+  Virtual Network.
+- **VirtualNetwork**: A tenant's isolated virtual network environment within a
+  specific region. The implementation behavior depends on the selected
+  NetworkClass. For the `tenant-isolated` class, VirtualNetwork is a logical
+  grouping; the actual namespace and UDN are created per Subnet.
+- **Subnet**: An IP address range within a VirtualNetwork. For the
+  `tenant-isolated` NetworkClass, each Subnet maps to a dedicated namespace
+  containing an OpenShift UserDefinedNetwork resource. Each VirtualNetwork
+  contains exactly one Subnet due to UDN isolation constraints.
+- **SecurityGroup**: A set of inbound and outbound traffic rules applied to
+  resources within a VirtualNetwork. SecurityGroups are implemented using
+  OVN-Kubernetes
+  [NetworkPolicies](https://ovn-kubernetes.io/features/network-security-controls/network-policy/).
+- **PublicIP**: A floating public IP address allocated from provider-managed
+  pools. PublicIPs are tenant-wide and scoped to a region. The IP persists until
+  explicitly released.
+- **PublicIPAttachment**: Binds a PublicIP to a target resource (e.g.,
+  ComputeInstance). Only one attachment per PublicIP is allowed at a time.
+
+The Networking API will be implemented through updates to the following O-SAC
+components:
+
+- **Fulfillment Service**: Expose the Networking API endpoints for
+  VirtualNetwork, Subnet, SecurityGroup, PublicIP, and PublicIPAttachment
+  resources
+- **Fulfillment CLI**: Provide tenant access to Networking API operations
+- **O-SAC Operator**: Manage and reconcile networking Custom Resources,
+  translating them to OpenShift primitives (UDN, NetworkPolicies, ...)
+- **O-SAC Ansible**: Execute provider's Ansible playbooks to perform custom
+  operations to the networking infrastructure (e.g.: allocating and assigning a
+  Public IP)
+
+### Integration with OSAC Services
+
+The Networking API is designed to be consumed by multiple OSAC services. This
+enhancement delivers the first integration:
+
+**Initial Integration (this enhancement):** - **ComputeInstance**: Extended with
+a `network_attachments` field that references Subnets and SecurityGroups within
+the tenant's VirtualNetwork
+
+**Planned Future Integrations:** - **HostPool**: Will leverage the
+`networkAttachments` pattern, referencing Subnets and SecurityGroups for
+bare-metal networking - **Cluster**: Will support cluster-level network
+configuration for OpenShift cluster networking
 
 ### Workflow Description
 
-Explain how the user will use the feature. Be detailed and explicit.
-Describe all of the actors, their roles, and the APIs or interfaces
-involved. Define a starting state and then list the steps that the
-user would need to go through to trigger the feature described in the
-enhancement. Optionally add a
-[mermaid](https://github.com/mermaid-js/mermaid#readme) sequence
-diagram.
+**Provider** is a cloud administrator responsible for managing the overall
+network infrastructure and defining what networking capabilities are available
+to tenants.
 
-Use sub-sections to explain variations, such as for error handling,
-failure recovery, or alternative outcomes.
+**Tenant** is an organization or user that consumes networking services to
+connect their resources (VMs, bare metal hosts, clusters).
 
-For example:
+#### VirtualNetwork Creation
 
-**cluster creator** is a human user responsible for deploying a
-cluster.
+1.  The tenant uses the Fulfillment CLI to create a VirtualNetwork by specifying
+    a name, region, NetworkClass, and CIDR range.
+2.  The Fulfillment Service validates the request and creates a VirtualNetwork
+    custom resource (CR) in the appropriate Hub (identified by the region).
+3.  The O-SAC Operator detects the new VirtualNetwork CR and marks it as ready.
+4.  Depending on the NetworkClass, additional provisioning operations may be
+    performed (e.g., configuring external fabric integration, allocating network
+    resources from infrastructure providers).
+5.  The tenant uses the Fulfillment CLI to check the VirtualNetwork status.
 
-**application administrator** is a human user responsible for
-deploying an application in a cluster.
+#### Subnet Management
 
-1. The cluster creator sits down at their keyboard...
-2. ...
-3. The cluster creator sees that their cluster is ready to receive
-   applications, and gives the application administrator their
-   credentials.
+1.  The tenant uses the Fulfillment CLI to create a new Subnet within their
+    VirtualNetwork.
+2.  The Fulfillment Service validates that the CIDR is within the
+    VirtualNetwork's CIDR range and creates a Subnet CR.
+3.  The O-SAC Operator detects the new Subnet CR and begins reconciliation:
+    - Creates a dedicated namespace for the Subnet
+    - Provisions the corresponding UserDefinedNetwork within that namespace
+4.  Depending on the NetworkClass, additional provisioning operations may be
+    performed (e.g., configuring VLAN tags, establishing connectivity to external
+    networks).
+5.  Once ready, the Subnet can be referenced when creating resources.
 
-See
-https://github.com/openshift/enhancements/blob/master/enhancements/workload-partitioning/management-workload-partitioning.md#high-level-end-to-end-workflow
-and https://github.com/openshift/enhancements/blob/master/enhancements/agent-installer/automated-workflow-for-agent-based-installer.md for more detailed examples.
+#### Attaching Resources to Networks
+
+1.  When creating a resource (e.g., ComputeInstance), the tenant specifies a
+    `network_attachment` referencing a Subnet and optionally one or more
+    SecurityGroups.
+2.  The Fulfillment Service validates that the Subnet and SecurityGroups belong
+    to the tenant's VirtualNetwork.
+3.  The O-SAC Operator configures the resource's network interfaces to attach to
+    the specified UserDefinedNetworks.
+4.  Depending on the NetworkClass, additional network configurations may be
+    applied (e.g., DHCP reservations, external routing setup).
+5.  The resource receives an IP address from the Subnet's CIDR range (the
+    allocation method depends on the NetworkClass implementation).
+
+#### SecurityGroup Configuration
+
+1.  The tenant creates or updates a SecurityGroup with ingress/egress rules.
+2.  The Fulfillment Service creates or updates the SecurityGroup CR.
+3.  The O-SAC Operator translates the rules into OVN-Kubernetes NetworkPolicies.
+4.  Depending on the NetworkClass, additional security configurations may be
+    applied (e.g., hardware firewall rules, fabric-level ACLs).
+5.  Traffic to/from resources associated with the SecurityGroup is filtered
+    according to the rules.
 
 ### API Extensions
 
-API Extensions are CRDs, admission and conversion webhooks, aggregated API servers,
-and finalizers, i.e. those mechanisms that change the OCP API surface and behaviour.
+The following sections describe the API resources introduced by this
+enhancement.
 
-- Name the API extensions this enhancement adds or modifies.
-- Does this enhancement modify the behaviour of existing resources, especially those owned
-  by other parties than the authoring team (including upstream resources), and, if yes, how?
-  Please add those other parties as reviewers to the enhancement.
+#### VirtualNetwork
 
-  Examples:
-  - Adds a finalizer to namespaces. Namespace cannot be deleted without our controller running.
-  - Restricts the label format for objects to X.
-  - Defaults field Y on object kind Z.
+A tenant requests a VirtualNetwork to create an isolated network environment
+with its own address space.
 
-Fill in the operational impact of these API Extensions in the "Operational Aspects
-of API Extensions" section.
+Example CLI command:
+
+    $ ./fulfillment-cli create virtualnetwork \
+           --cidr 10.0.0.0/16 \
+           --network-class tenant-isolated \
+           --name my-network
+
+The Fulfillment CLI sends this JSON request to the Fulfillment Service:
+
+``` json
+{
+  "object": {
+    "id": "my-network",
+    "spec": {
+      "cidr": "10.0.0.0/16",
+      "networkClass": "tenant-isolated"
+    }
+  }
+}
+```
+
+The Fulfillment Service creates the following VirtualNetwork CR:
+
+``` yaml
+apiVersion: o-sac.openshift.io/v1alpha1
+kind: VirtualNetwork
+metadata:
+  name: my-network
+  labels:
+    tenantUID: 66b8ed6f-1af2-4892-ac12-47bd47dacd40
+spec:
+  cidr: 10.0.0.0/16
+  networkClass: tenant-isolated
+status:
+  state: Ready
+  conditions:
+  - type: Ready
+    status: "True"
+    lastTransitionTime: "2025-01-07T10:00:00Z"
+```
+
+#### Subnet
+
+Subnets define IP address ranges within a VirtualNetwork. Each Subnet maps to a
+dedicated namespace containing an OpenShift UserDefinedNetwork.
+
+Example CLI command:
+
+    $ ./fulfillment-cli create subnet \
+           --virtual-network my-network \
+           --cidr 10.0.1.0/24 \
+           --name frontend-subnet
+
+The Fulfillment Service creates the following Subnet CR:
+
+``` yaml
+apiVersion: o-sac.openshift.io/v1alpha1
+kind: Subnet
+metadata:
+  name: frontend-subnet
+  ownerReferences:
+  - apiVersion: o-sac.openshift.io/v1alpha1
+    kind: VirtualNetwork
+    name: my-network
+    uid: 77c9fe7g-2bg3-5903-bd23-58ce58ebde51
+spec:
+  virtualNetwork: my-network
+  cidr: 10.0.1.0/24
+status:
+  state: Ready
+  namespace: tenant-66b8ed6f-subnet-frontend-subnet
+  udnName: frontend-subnet-udn
+```
+
+The O-SAC Operator creates a namespace for the Subnet and the corresponding
+UserDefinedNetwork:
+
+``` yaml
+apiVersion: k8s.ovn.org/v1
+kind: UserDefinedNetwork
+metadata:
+  name: frontend-subnet-udn
+  namespace: tenant-66b8ed6f-subnet-frontend-subnet
+spec:
+  topology: Layer2
+  layer2:
+    role: Primary
+    subnets:
+    - cidr: 10.0.1.0/24
+      hostSubnet: 24
+```
+
+#### SecurityGroup
+
+SecurityGroups define traffic filtering rules for resources within a
+VirtualNetwork.
+
+Example CLI command:
+
+    $ ./fulfillment-cli create security-group \
+           --virtual-network my-network \
+           --name web-servers \
+           --ingress "protocol:tcp,port:80,source:0.0.0.0/0" \
+           --ingress "protocol:tcp,port:443,source:0.0.0.0/0" \
+           --egress "protocol:all,destination:0.0.0.0/0"
+
+The Fulfillment Service creates the following SecurityGroup CR:
+
+``` yaml
+apiVersion: o-sac.openshift.io/v1alpha1
+kind: SecurityGroup
+metadata:
+  name: web-servers
+  ownerReferences:
+  - apiVersion: o-sac.openshift.io/v1alpha1
+    kind: VirtualNetwork
+    name: my-network
+spec:
+  virtualNetwork: my-network
+  ingressRules:
+  - protocol: TCP
+    port: 80
+    source: 0.0.0.0/0
+    description: "Allow HTTP"
+  - protocol: TCP
+    port: 443
+    source: 0.0.0.0/0
+    description: "Allow HTTPS"
+  egressRules:
+  - protocol: All
+    destination: 0.0.0.0/0
+    description: "Allow all outbound"
+status:
+  state: Ready
+```
+
+The O-SAC Operator translates the SecurityGroup into an OVN-Kubernetes
+NetworkPolicy:
+
+``` yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-servers
+  namespace: tenant-66b8ed6f-subnet-frontend-subnet
+spec:
+  podSelector:
+    matchLabels:
+      o-sac.openshift.io/security-group: web-servers
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 80
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+```
+
+#### PublicIP
+
+PublicIPs are floating public IP addresses allocated from provider-managed
+pools. They are tenant-wide and scoped to a region, allowing them to be attached
+to any resource in that region.
+
+Example CLI commands:
+
+    $ ./fulfillment-cli create publicip --region us-east-1 --name my-public-ip
+    $ ./fulfillment-cli delete publicip my-public-ip
+
+The Fulfillment Service creates the following PublicIP CR:
+
+``` yaml
+apiVersion: o-sac.openshift.io/v1alpha1
+kind: PublicIP
+metadata:
+  name: my-public-ip
+  labels:
+    tenantUID: 66b8ed6f-1af2-4892-ac12-47bd47dacd40
+spec:
+  region: us-east-1
+status:
+  state: Allocated  # Allocated | Attached | Releasing
+  address: 203.0.113.45
+```
+
+#### PublicIPAttachment
+
+PublicIPAttachment binds a PublicIP to a target resource. Only one attachment
+per PublicIP is allowed at a time. Deleting the attachment detaches the IP but
+does not release it.
+
+Example CLI commands:
+
+    $ ./fulfillment-cli create publicipattachment \
+           --publicip my-public-ip \
+           --target-type ComputeInstance \
+           --target-name my-vm \
+           --name my-attachment
+
+    $ ./fulfillment-cli delete publicipattachment my-attachment
+
+The Fulfillment Service creates the following PublicIPAttachment CR:
+
+``` yaml
+apiVersion: o-sac.openshift.io/v1alpha1
+kind: PublicIPAttachment
+metadata:
+  name: my-attachment
+  ownerReferences:
+  - apiVersion: o-sac.openshift.io/v1alpha1
+    kind: PublicIP
+    name: my-public-ip
+spec:
+  publicIP: my-public-ip
+  target:
+    kind: ComputeInstance
+    name: my-vm
+status:
+  state: Active
+```
+
+#### Integration: ComputeInstance
+
+As the first consumer of the Networking API, ComputeInstance is extended with a
+`network_attachments` field:
+
+``` yaml
+spec:
+  template: ocp_virt_vm
+  network_attachments:
+  - subnet: frontend-subnet
+    securityGroups:
+    - web-servers
+```
+
+This allows tenants to attach their Compute Instances to specific Subnets and
+apply SecurityGroups for traffic control.
+
 
 ### Implementation Details/Notes/Constraints
 
-What are some important details that didn't come across above in the
-**Proposal**? Go in to as much detail as necessary here. This might be
-a good place to talk about core concepts and how they relate. While it is useful
-to go into the details of the code changes required, it is not necessary to show
-how the code will be rewritten in the enhancement.
+**NetworkClass Controller**: The NetworkClass resource is cluster-scoped and
+managed by the provider. The O-SAC Operator watches NetworkClass resources to
+determine which provisioner to use when reconciling VirtualNetworks.
+
+**Namespace per Subnet**: For the `tenant-isolated` NetworkClass, each Subnet
+gets its own namespace. Since UDNs are namespace-scoped in OpenShift, this
+mapping ensures proper isolation. The VirtualNetwork itself is a logical
+grouping that doesn't require a dedicated namespace.
+
+**UDN Lifecycle**: A namespace and UserDefinedNetwork are created when a Subnet
+is provisioned. Both are deleted when the Subnet is removed. The VirtualNetwork
+can only be deleted after all its child Subnets have been removed.
 
 ### Risks and Mitigations
 
-What are the risks of this proposal and how do we mitigate. Think broadly. For
-example, consider both security and how this will impact the larger OKD
-ecosystem.
+  ------------------------------------------------------------------------------
+  Risk               Impact                  Mitigation
+  ------------------ ----------------------- -----------------------------------
+  UDN feature        UDN requires            Document minimum OpenShift version
+  availability       OVN-Kubernetes and may  requirements; provide clear error
+                     not be available in all messages if UDN is unavailable
+                     OpenShift versions      
 
-How will security be reviewed and by whom?
+  Namespace          Many Subnets could lead Implement namespace quotas per
+  proliferation      to namespace management tenant; consider namespace pooling
+                     overhead (one namespace in future enhancements
+                     per Subnet)             
 
-How will UX be reviewed and by whom?
+  Network isolation  Misconfigured           Default-deny network policies;
+  bypass             SecurityGroups could    validate SecurityGroup rules
+                     expose tenant resources against allowed patterns
 
-Consider including folks that also work outside your immediate sub-project.
+  API complexity     New networking concepts Provide sensible defaults;
+                     add learning curve for  comprehensive CLI help and
+                     users                   documentation
+  ------------------------------------------------------------------------------
 
 ### Drawbacks
 
-The idea is to find the best form of an argument why this enhancement should
-_not_ be implemented.
-
-What trade-offs (technical/efficiency cost, user experience, flexibility,
-supportability, etc) must be made in order to implement this? What are the reasons
-we might not want to undertake this proposal, and how do we overcome them?
-
-Does this proposal implement a behavior that's new/unique/novel? Is it poorly
-aligned with existing user expectations?  Will it be a significant maintenance
-burden?  Is it likely to be superceded by something else in the near future?
+**Single Subnet per Virtual Network**: OpenShift's User Defined Networks (UDN)
+are isolated from each other at the OVN level. This architectural constraint
+means that each Virtual Network can only contain a single subnet. Unlike
+traditional cloud providers where a Virtual Network can host multiple subnets,
+our implementation maps one Subnet to one UDN, which inherently supports only
+one subnet. Users requiring multiple isolated network segments must create
+multiple Virtual Networks rather than multiple Subnets within a single Virtual
+Network.
 
 ## Alternatives (Not Implemented)
 
-Similar to the `Drawbacks` section the `Alternatives` section is used
-to highlight and record other possible approaches to delivering the
-value proposed by an enhancement, including especially information
-about why the alternative was not selected.
+### Alternative 1: Embed networking in ComputeInstance spec
 
-## Open Questions [optional]
+Instead of separate VirtualNetwork/Subnet resources, networking could be defined
+inline within the ComputeInstance specification.
 
-This is where to call out areas of the design that require closure before deciding
-to implement the design.  For instance,
- > 1. This requires exposing previously private resources which contain sensitive
-  information.  Can we do this?
+**Why not selected**: This approach maintains the tight coupling we're trying to
+eliminate. It prevents network reuse across resources and doesn't align with
+cloud provider patterns that users are familiar with.
+
+### Alternative 2: Use Multus directly without UDN abstraction
+
+Directly expose Multus NetworkAttachmentDefinitions to tenants without the
+VirtualNetwork/Subnet abstraction.
+
+**Why not selected**: Multus NADs are lower-level primitives that expose
+implementation details. The VirtualNetwork abstraction provides a cleaner tenant
+experience and allows swapping implementations via NetworkClass.
+
+### Alternative 3: Single VirtualNetwork per tenant (no explicit creation)
+
+Automatically create one VirtualNetwork per tenant, eliminating the need for
+explicit VirtualNetwork management.
+
+**Why not selected**: This limits flexibility for tenants who need multiple
+isolated network segments. It also restricts providers from offering
+NetworkClasses that support multiple subnets within a VirtualNetwork. The
+explicit VirtualNetwork creation aligns with cloud provider models and provides
+better isolation control.
+
+## Open Questions
+
+1.  Should SecurityGroups be scoped to a VirtualNetwork or to the entire tenant?
+    Current proposal scopes them to VirtualNetwork (similar to AWS), but
+    tenant-wide SecurityGroups could simplify reuse.
+
+2.  Should PublicIP be part of a NetworkClass?
+
 
 ## Test Plan
 
-**Note:** *Section not required until targeted at a release.*
+*Section to be completed when targeted at a release.*
 
-Consider the following in developing a test plan for this enhancement:
-- Will there be e2e and integration tests, in addition to unit tests?
-- How will it be tested in isolation vs with other components?
-- What additional testing is necessary to support managed OpenShift service-based offerings?
-
-No need to outline all of the test cases, just the general strategy. Anything
-that would count as tricky in the implementation and anything particularly
-challenging to test should be called out.
-
-All code is expected to have adequate tests (eventually with coverage
-expectations).
+Testing strategy will include: - Unit tests for API validation and controller
+logic - Integration tests for VirtualNetwork, Subnet, SecurityGroup, PublicIP,
+and PublicIPAttachment lifecycle - E2E tests for resource network attachment
+workflows - Multi-tenant isolation tests to verify network separation
 
 ## Graduation Criteria
 
-**Note:** *Section not required until targeted at a release.*
+*Section to be completed when targeted at a release.*
 
-Define graduation milestones.
+Graduation from Dev Preview to Tech Preview: - Core API resources
+(VirtualNetwork, Subnet, SecurityGroup, PublicIP, PublicIPAttachment) are
+functional - `tenant-isolated` NetworkClass is implemented and tested -
+Documentation for tenant and provider workflows
 
-These may be defined in terms of API maturity, or as something else. Initial proposal
-should keep this high-level with a focus on what signals will be looked at to
-determine graduation.
-
-Consider the following in developing the graduation criteria for this
-enhancement:
-
-- Maturity levels
-  - [`alpha`, `beta`, `stable` in upstream Kubernetes][maturity-levels]
-  - `Dev Preview`, `Tech Preview`, `GA` in OpenShift
-- [Deprecation policy][deprecation-policy]
-
-Clearly define what graduation means by either linking to the [API doc definition](https://kubernetes.io/docs/concepts/overview/kubernetes-api/#api-versioning),
-or by redefining what graduation means.
-
-In general, we try to use the same stages (alpha, beta, GA), regardless how the functionality is accessed.
-
-[maturity-levels]: https://git.k8s.io/community/contributors/devel/sig-architecture/api_changes.md#alpha-beta-and-stable-versions
-[deprecation-policy]: https://kubernetes.io/docs/reference/using-api/deprecation-policy/
-
-**If this is a user facing change requiring new or updated documentation in [openshift-docs](https://github.com/openshift/openshift-docs/),
-please be sure to include in the graduation criteria.**
-
-**Examples**: These are generalized examples to consider, in addition
-to the aforementioned [maturity levels][maturity-levels].
-
-### Removing a deprecated feature
-
-- Announce deprecation and support policy of the existing feature
-- Deprecate the feature
+Graduation from Tech Preview to GA: - API stability (no breaking changes) -
+Performance and scalability validated - Support procedures documented
 
 ## Upgrade / Downgrade Strategy
 
-If applicable, how will the component be upgraded and downgraded? Make sure this
-is in the test plan.
+*Section to be completed when targeted at a release.*
 
-Consider the following in developing an upgrade/downgrade strategy for this
-enhancement:
-- What changes (in invocations, configurations, API use, etc.) is an existing
-  cluster required to make on upgrade in order to keep previous behavior?
-- What changes (in invocations, configurations, API use, etc.) is an existing
-  cluster required to make on upgrade in order to make use of the enhancement?
-
-Upgrade expectations:
-- Each component should remain available for user requests and
-  workloads during upgrades. Ensure the components leverage best practices in handling [voluntary
-  disruption](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/). Any exception to
-  this should be identified and discussed here.
-- Micro version upgrades - users should be able to skip forward versions within a
-  minor release stream without being required to pass through intermediate
-  versions - i.e. `x.y.N->x.y.N+2` should work without requiring `x.y.N->x.y.N+1`
-  as an intermediate step.
-- Minor version upgrades - you only need to support `x.N->x.N+1` upgrade
-  steps. So, for example, it is acceptable to require a user running 4.3 to
-  upgrade to 4.5 with a `4.3->4.4` step followed by a `4.4->4.5` step.
-- While an upgrade is in progress, new component versions should
-  continue to operate correctly in concert with older component
-  versions (aka "version skew"). For example, if a node is down, and
-  an operator is rolling out a daemonset, the old and new daemonset
-  pods must continue to work correctly even while the cluster remains
-  in this partially upgraded state for some time.
-
-Downgrade expectations:
-- If an `N->N+1` upgrade fails mid-way through, or if the `N+1` cluster is
-  misbehaving, it should be possible for the user to rollback to `N`. It is
-  acceptable to require some documented manual steps in order to fully restore
-  the downgraded cluster to its previous state. Examples of acceptable steps
-  include:
-  - Deleting any CVO-managed resources added by the new version. The
-    CVO does not currently delete resources that no longer exist in
-    the target version.
+Key considerations: - Existing Compute Instances created before this enhancement
+must continue to work - New networking resources should be opt-in initially -
+Downgrade should preserve existing network configurations
 
 ## Version Skew Strategy
 
-How will the component handle version skew with other components?
-What are the guarantees? Make sure this is in the test plan.
+*Section to be completed when targeted at a release.*
 
-Consider the following in developing a version skew strategy for this
-enhancement:
-- During an upgrade, we will always have skew among components, how will this impact your work?
-- Does this enhancement involve coordinating behavior in the control plane and
-  in the kubelet? How does an n-2 kubelet without this feature available behave
-  when this feature is used?
-- Will any other components on the node change? For example, changes to CSI, CRI
-  or CNI may require updating that component before the kubelet.
+The Networking API is managed by the Fulfillment Service and O-SAC Operator.
+Version skew considerations: - Fulfillment Service API changes must be backward
+compatible - O-SAC Operator must handle CRs from both old and new API versions
+during upgrades
 
 ## Support Procedures
 
-Describe how to
-- detect the failure modes in a support situation, describe possible symptoms (events, metrics,
-  alerts, which log output in which component)
+*Section to be completed when targeted at a release.*
 
-  Examples:
-  - If the webhook is not running, kube-apiserver logs will show errors like "failed to call admission webhook xyz".
-  - Operator X will degrade with message "Failed to launch webhook server" and reason "WehhookServerFailed".
-  - The metric `webhook_admission_duration_seconds("openpolicyagent-admission", "mutating", "put", "false")`
-    will show >1s latency and alert `WebhookAdmissionLatencyHigh` will fire.
+Failure detection: - VirtualNetwork stuck in "Pending" state indicates UDN
+creation failure - SecurityGroup rules not applied indicates NetworkPolicy
+reconciliation issues - Compute Instance unable to attach to network indicates
+NAD or UDN misconfiguration
 
-- disable the API extension (e.g. remove MutatingWebhookConfiguration `xyz`, remove APIService `foo`)
+## Infrastructure Needed
 
-  - What consequences does it have on the cluster health?
-
-    Examples:
-    - Garbage collection in kube-controller-manager will stop working.
-    - Quota will be wrongly computed.
-    - Disabling/removing the CRD is not possible without removing the CR instances. Customer will lose data.
-      Disabling the conversion webhook will break garbage collection.
-
-  - What consequences does it have on existing, running workloads?
-
-    Examples:
-    - New namespaces won't get the finalizer "xyz" and hence might leak resource X
-      when deleted.
-    - SDN pod-to-pod routing will stop updating, potentially breaking pod-to-pod
-      communication after some minutes.
-
-  - What consequences does it have for newly created workloads?
-
-    Examples:
-    - New pods in namespace with Istio support will not get sidecars injected, breaking
-      their networking.
-
-- Does functionality fail gracefully and will work resume when re-enabled without risking
-  consistency?
-
-  Examples:
-  - The mutating admission webhook "xyz" has FailPolicy=Ignore and hence
-    will not block the creation or updates on objects when it fails. When the
-    webhook comes back online, there is a controller reconciling all objects, applying
-    labels that were not applied during admission webhook downtime.
-  - Namespaces deletion will not delete all objects in etcd, leading to zombie
-    objects when another namespace with the same name is created.
-
-## Infrastructure Needed [optional]
-
-Use this section if you need things from the project. Examples include a new
-subproject, repos requested, github details, and/or testing infrastructure.
-
+No additional infrastructure is required for this enhancement. Implementation
+will use existing OSAC components and OpenShift UDN capabilities.
