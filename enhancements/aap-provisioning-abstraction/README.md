@@ -32,27 +32,20 @@ Create a **ProvisioningProvider** interface that encapsulates the "trigger autom
 type ProvisioningProvider interface {
     // TriggerProvision starts provisioning for a resource
     // Returns a job ID that can be used to track status
-    TriggerProvision(ctx context.Context, resource ProvisioningResource) (jobID string, err error)
+    TriggerProvision(ctx context.Context, resource client.Object) (jobID string, err error)
 
     // GetProvisionStatus checks the status of a provisioning job
     // Returns current status and whether the job is complete
     GetProvisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error)
 
     // TriggerDeprovision starts deprovisioning for a resource
-    TriggerDeprovision(ctx context.Context, resource ProvisioningResource) (jobID string, err error)
+    TriggerDeprovision(ctx context.Context, resource client.Object) (jobID string, err error)
 
     // GetDeprovisionStatus checks the status of a deprovisioning job
     GetDeprovisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error)
 
     // Name returns the provider name for logging
     Name() string
-}
-
-type ProvisioningResource interface {
-    GetName() string
-    GetNamespace() string
-    GetDesiredConfigVersion() string
-    // Add other methods as needed
 }
 
 type ProvisionStatus struct {
@@ -88,7 +81,7 @@ type EDAProvider struct {
     deleteURL     string
 }
 
-func (p *EDAProvider) TriggerProvision(ctx context.Context, resource ProvisioningResource) (string, error) {
+func (p *EDAProvider) TriggerProvision(ctx context.Context, resource client.Object) (string, error) {
     // Current webhook-based approach
     // EDA handles the actual job triggering
     // JobID is the resource name (since we don't get a real job ID from EDA)
@@ -117,7 +110,7 @@ type AAPDirectProvider struct {
     templateName  string  // AAP job template name
 }
 
-func (p *AAPDirectProvider) TriggerProvision(ctx context.Context, resource ProvisioningResource) (string, error) {
+func (p *AAPDirectProvider) TriggerProvision(ctx context.Context, resource client.Object) (string, error) {
     // Call AAP API directly to launch job template
     // POST /api/v2/job_templates/{id}/launch/
     jobLaunchResp, err := p.aapClient.LaunchJobTemplate(ctx, LaunchRequest{
@@ -209,13 +202,39 @@ func (c *AAPClient) GetJob(ctx context.Context, jobID string) (*Job, error) {
 }
 ```
 
+## Reconciliation Flow Comparison
+
+### EDA Provider (Current)
+1. Reconciler triggers webhook to EDA
+2. EDA receives webhook and launches AAP job/workflow
+3. AAP executes playbook
+4. AAP updates CR annotation when job completes
+5. Annotation update triggers reconciler via watch
+6. Reconciler reads annotation to determine success/failure
+
+**Characteristics:**
+- Passive polling: waits for AAP to update the CR
+- No direct job status visibility
+- Relies on annotation-based feedback
+
+### AAP Direct Provider (New)
+1. Reconciler calls AAP API to launch job, stores job ID in CR status
+2. Reconciler polls AAP API for job status
+3. If job still running, reconciler requeues itself with delay (e.g., 30s)
+4. When job completes, reconciler updates CR status with result
+5. No annotation updates needed from AAP
+
+**Characteristics:**
+- Active polling with requeuing: reconciler drives the status checks
+- Direct job status visibility via AAP API
+- Job failures and progress reported in CR status
+
 ## Critical Files to Modify
 
 ### 1. Create Abstraction Interface
 **File:** `cloudkit-operator/internal/provisioning/provider.go` (new)
 - Define `ProvisioningProvider` interface
 - Define `ProvisionStatus`, `JobState` types
-- Define `ProvisioningResource` interface
 
 ### 2. Create EDA Provider Implementation
 **File:** `cloudkit-operator/internal/provisioning/eda_provider.go` (new)
@@ -283,7 +302,7 @@ func (c *AAPClient) GetJob(ctx context.Context, jobID string) (*Job, error) {
 ### Phase 4: Implement AAP Direct Provider
 1. Create `AAPDirectProvider` using AAP client
 2. Implement job triggering via API
-3. Implement status polling
+3. Implement status polling with requeuing
 4. Handle job failures and error reporting
 5. Write unit tests
 
