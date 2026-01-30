@@ -14,7 +14,7 @@ superseded-by:
 
 # ComputeInstance Phase and Condition Expansion
 
-## Summary
+## 1. Summary
 
 This enhancement proposes a cleanup and expansion of the `ComputeInstancePhaseType` and `ComputeInstanceConditionType` values for the OSAC VMaaS offering.
 
@@ -26,11 +26,11 @@ The redesign expands from 4 phases to 8 phases to properly represent the full VM
 
 This change enables users to understand VM power state (running, stopped, paused), see transitional progress (starting, stopping), and receive clear health signals through conditions - providing the operational visibility expected from a modern cloud platform.
 
-## Motivation
+## 2. Motivation
 
 As VMaaS matures to support full VM lifecycle operations, users need clear visibility into VM power state and operational status. The current phase model does not distinguish between a running VM and a stopped VM, and conditions overlap with phases rather than providing independent health information. This enhancement addresses these gaps to provide the operational visibility expected from a modern cloud platform.
 
-### User Stories
+### 2.1 User Stories
 
 **For Tenants:**
 
@@ -49,7 +49,7 @@ As VMaaS matures to support full VM lifecycle operations, users need clear visib
 * As a developer, I want a phase/condition model where conditions are orthogonal to phases, so that new conditions can be added in future releases without breaking my existing integrations
 * As a developer, I want a well-defined phase model that can accommodate future VM operations (e.g., live migration), so that the API can evolve to support new capabilities
 
-### Goals
+### 2.2 Goals
 
 * Represent VM power state clearly - Users can see if a VM is Running, Stopped, or Paused
 * Expose transitional states - Users can see when operations are in progress (Starting, Stopping, Deleting)
@@ -57,13 +57,13 @@ As VMaaS matures to support full VM lifecycle operations, users need clear visib
 * Make conditions orthogonal to phases - Conditions represent health/status attributes, not lifecycle state
 * Expose DELETING in API - The K8s operator's Deleting phase should be visible in the public API
 
-### Non-Goals
+### 2.3 Non-Goals
 
 * Additional conditions - Conditions such as NetworkReady and RestartRequired will be addressed in future enhancements as their dependencies (networking design, configuration change detection) are not yet finalized
 * New VM operations - This enhancement is about status representation, not adding pause/resume/stop operations themselves
 * Hibernate (suspend to disk) - Only in-memory pause is supported by KubeVirt; hibernate is out of scope
 
-## Proposal
+## 3. Proposal
 
 This enhancement modifies the `ComputeInstance` status model across three layers:
 
@@ -107,7 +107,7 @@ This enhancement modifies the `ComputeInstance` status model across three layers
 
 The phase values are derived from the underlying KubeVirt `VirtualMachine.Status.PrintableStatus`, ensuring accurate representation of VM power state.
 
-### Workflow Description
+### 3.1 Workflow Description
 
 **Phase Transitions**
 
@@ -150,7 +150,7 @@ Restart is not a separate phase. When a tenant restarts a VM:
 [Any state] ──► Deleting ──► (removed)
 ```
 
-### API Extensions
+### 3.2 API Extensions
 
 This enhancement modifies existing API types rather than adding new CRDs or webhooks.
 
@@ -197,7 +197,7 @@ This enhancement modifies existing API types rather than adding new CRDs or webh
 - `ComputeInstance.status.phase` will reflect VM power state (`Running`, `Stopped`, `Paused`) rather than reconciliation status
 - Conditions are orthogonal to phases - a condition like `Available` can be True or False independent of the phase
 
-### Implementation Details/Notes/Constraints
+### 3.3 Implementation Details/Notes/Constraints
 
 **Phase Determination Logic**
 
@@ -253,7 +253,7 @@ The following table shows the expected values of `Available` and `Degraded` cond
 
 Since the product is in development with no external clients, old enum values (`PROGRESSING`, `READY`, `FAILED` for conditions) will be removed rather than deprecated. The controller will emit only the new phase and condition values.
 
-### Risks and Mitigations
+### 3.4 Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
@@ -263,7 +263,7 @@ Since the product is in development with no external clients, old enum values (`
 | **Edge cases in KubeVirt state transitions** - KubeVirt may have transitional states or error conditions not fully mapped | Review KubeVirt documentation; manual testing with various VM scenarios (create, stop, start, pause, resume, delete, error conditions) |
 | **Condition logic complexity** - Determining when `Available` and `Degraded` should be True/False adds controller complexity | Document condition semantics clearly; use table-driven logic in controller for maintainability |
 
-### Drawbacks
+### 3.5 Drawbacks
 
 **Migration effort for internal consumers**
 
@@ -277,7 +277,7 @@ Expanding from 4 phases to 8 phases means more states to reason about in control
 
 Unlike Stopping, we cannot show a "Pausing" transitional phase because KubeVirt does not expose this state - pause is instantaneous. GCE is the only major cloud provider that exposes a `SUSPENDING` transitional state; AWS and KubeVirt transition directly to the paused/stopped state. This minor inconsistency reflects the underlying platform behavior accurately.
 
-## Alternatives (Not Implemented)
+## 4. Alternatives (Not Implemented)
 
 **1. Deprecate old values instead of removing them**
 
@@ -291,12 +291,12 @@ We could add a `Pausing` phase to mirror the `Stopping` transitional phase.
 
 *Why not selected:* KubeVirt does not expose a transitional "pausing" state - pause is instantaneous. Adding a phase we cannot accurately populate would be misleading.
 
-## Open Questions [optional]
+## 5. Open Questions
 
 - **NetworkReady condition** - Requires networking design to be finalized before this condition can be defined
 - **RestartRequired condition** - Requires configuration change detection logic to be designed
 
-## Test Plan
+## 6. Test Plan
 
 - **Unit tests**: Phase determination logic in `computeinstance_controller.go` - test each KubeVirt `PrintableStatus` → ComputeInstance phase mapping
 - **Unit tests**: Condition setting logic - test `Available` and `Degraded` conditions for each phase
@@ -304,22 +304,22 @@ We could add a `Pausing` phase to mirror the `Stopping` transitional phase.
 - **Manual testing**: Create VMs in dev environment and verify phase transitions through lifecycle operations (create, stop, start, pause, resume, delete)
 - **Manual testing**: Verify error scenarios produce `Failed` phase
 
-## Graduation Criteria
+## 7. Graduation Criteria
 
 TBD
 
-## Upgrade / Downgrade Strategy
+## 8. Upgrade / Downgrade Strategy
 
 TBD
 
-## Version Skew Strategy
+## 9. Version Skew Strategy
 
 N/A
 
-## Support Procedures
+## 10. Support Procedures
 
 TBD
 
-## Infrastructure Needed [optional]
+## 11. Infrastructure Needed
 
 N/A
