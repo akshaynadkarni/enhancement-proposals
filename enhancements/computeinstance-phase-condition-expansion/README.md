@@ -101,48 +101,89 @@ As VMaaS matures to support full VM lifecycle operations, users need clear visib
 
 ## Proposal
 
-This section should explain what the proposal actually is. Enumerate
-*all* of the proposed changes at a *high level*, including all of the
-components that need to be modified and how they will be
-different. Include the reason for each choice in the design and
-implementation that is proposed here.
+This enhancement modifies the `ComputeInstance` status model across three layers:
 
-To keep this section succinct, document the details like API field
-changes, new images, and other implementation details in the
-**Implementation Details** section and record the reasons for not
-choosing alternatives in the **Alternatives** section at the end of
-the document.
+**1. OSAC Operator (Kubernetes CRD)**
+- Expand `ComputeInstancePhaseType` from 4 phases to 9 phases
+- Redesign `ComputeInstanceConditionType` to be orthogonal to phases
+
+**2. Fulfillment API (Public protobuf)**
+- Add corresponding `ComputeInstanceState` enum values
+- Update `ComputeInstanceConditionType` enum to match the orthogonal design
+- Deprecate old values (`PROGRESSING`, `READY`) while maintaining backward compatibility
+
+**3. Fulfillment Service (Private protobuf)**
+- Mirror public API changes
+- Fix RESTART/REBOOT terminology inconsistency
+
+**Proposed Phases (9):**
+
+| Phase | Description |
+|-------|-------------|
+| `Pending` | VM is being provisioned, infrastructure resources allocating |
+| `Starting` | VM is powering on, guest OS booting |
+| `Running` | VM is running and operational |
+| `Stopping` | VM is powering off, guest OS shutting down |
+| `Stopped` | VM is powered off, resources retained |
+| `Pausing` | VM memory state is being saved |
+| `Paused` | VM is paused, memory preserved, no CPU allocated |
+| `Deleting` | VM is being permanently deleted |
+| `Failed` | VM encountered an error |
+
+**Proposed Conditions (orthogonal to phases):**
+
+| Condition | Description |
+|-----------|-------------|
+| `Provisioned` | Infrastructure resources (compute, storage) are allocated |
+| `Available` | VM is ready for user workloads |
+| `Degraded` | VM is running but with reduced capability |
+| `ConfigurationApplied` | Desired configuration matches actual |
+| `RestartInProgress` | Restart operation is in progress |
+| `RestartFailed` | Restart operation failed |
+
+The phase values are derived from the underlying KubeVirt `VirtualMachine.Status.PrintableStatus`, ensuring accurate representation of VM power state.
 
 ### Workflow Description
 
-Explain how the user will use the feature. Be detailed and explicit.
-Describe all of the actors, their roles, and the APIs or interfaces
-involved. Define a starting state and then list the steps that the
-user would need to go through to trigger the feature described in the
-enhancement. Optionally add a
-[mermaid](https://github.com/mermaid-js/mermaid#readme) sequence
-diagram.
+**Phase Transitions**
 
-Use sub-sections to explain variations, such as for error handling,
-failure recovery, or alternative outcomes.
+A tenant creates a ComputeInstance and observes its lifecycle through phases:
 
-For example:
+1. **Create**: Tenant requests a new VM → Phase: `Pending`
+2. **Provisioning completes**: KubeVirt VM is created, booting → Phase: `Starting`
+3. **Boot completes**: VM is operational → Phase: `Running`
+4. **Stop requested**: Tenant stops the VM → Phase: `Stopping` → `Stopped`
+5. **Start requested**: Tenant starts the VM → Phase: `Starting` → `Running`
+6. **Pause requested**: Tenant pauses the VM → Phase: `Pausing` → `Paused`
+7. **Resume requested**: Tenant resumes the VM → Phase: `Running`
+8. **Delete requested**: Tenant deletes the VM → Phase: `Deleting` → (resource removed)
 
-**cluster creator** is a human user responsible for deploying a
-cluster.
+**Restart Handling**
 
-**application administrator** is a human user responsible for
-deploying an application in a cluster.
+Restart is not a separate phase. When a tenant restarts a VM:
+- Phase transitions: `Running` → `Stopping` → `Stopped` → `Starting` → `Running`
+- Condition `RestartInProgress` is set to `True` throughout the operation
+- On completion, `RestartInProgress` is set to `False`
+- On failure, phase becomes `Failed` and condition `RestartFailed` is set to `True`
 
-1. The cluster creator sits down at their keyboard...
-2. ...
-3. The cluster creator sees that their cluster is ready to receive
-   applications, and gives the application administrator their
-   credentials.
+**State Transition Diagram**
 
-See
-https://github.com/openshift/enhancements/blob/master/enhancements/workload-partitioning/management-workload-partitioning.md#high-level-end-to-end-workflow
-and https://github.com/openshift/enhancements/blob/master/enhancements/agent-installer/automated-workflow-for-agent-based-installer.md for more detailed examples.
+```
+[Create] → Pending → Starting → Running
+                                  │
+                ┌─────────────────┼─────────────────┐
+                ↓                 ↓                 ↓
+            Stopping          Pausing           Deleting
+                ↓                 ↓                 ↓
+            Stopped            Paused          (removed)
+                │                 │
+                └──→ Starting ←───┘
+                        ↓
+                     Running
+
+[Any state] → Failed (on error)
+[Any state] → Deleting → (removed)
+```
 
 ### API Extensions
 
