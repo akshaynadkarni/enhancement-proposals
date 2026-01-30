@@ -1,54 +1,18 @@
 ---
-title: neat-enhancement-idea
+title: computeinstance-phase-condition-expansion
 authors:
-  - TBD
-creation-date: yyyy-mm-dd
-last-updated: yyyy-mm-dd
-tracking-link: # link to the tracking ticket (for example: Github issue) that corresponds to this enhancement
+  - Akshay Nadkarni
+creation-date: 2026-01-29
+last-updated: 2026-01-29
+tracking-link:
   - TBD
 see-also:
-  - "/enhancements/this-other-neat-thing"
 replaces:
-  - "/enhancements/that-less-than-great-idea"
+  - "[ComputeInstance-VM_PhasesAndConditions_Proposal (Google Doc)](https://docs.google.com/document/d/1wgqAblnT7OHlT5bvaI4bi842kyeR3u4VfC_TAJXbGcI/edit?usp=sharing)"
 superseded-by:
-  - "/enhancements/our-past-effort"
 ---
 
-To get started with this template:``
-1. **Create a directory.** Create the directory for your enhancement proposal.
-1. **Make a copy of this template.** Copy this template into the directory for
-   the proposal as `README.md`.
-1. **Fill out the metadata at the top.** The embedded YAML document is
-   checked by the linter.
-1. **Fill out the "overview" sections.** This includes the Summary and
-   Motivation sections. These should be easy and explain why the community
-   should desire this enhancement.
-1. **Create a PR.** Assign it to folks with expertise in that domain to help
-   sponsor the process.
-1. **Merge after reaching consensus.** Merge when there is consensus
-   that the design is complete and all reviewer questions have been
-   answered so that work can begin.  Come back and update the document
-   if important details (API field names, workflow, etc.) change
-   during code review.
-1. **Keep all required headers.** If a section does not apply to an
-   enhancement, explain why but do not remove the section. This part
-   of the process is enforced by the linter CI job.
-
-See ../README.md for background behind these instructions.
-
-Start by filling out the header with the metadata for this enhancement.
-
-# Neat Enhancement Idea
-
-This is the title of the enhancement. Keep it simple and descriptive. A good
-title can help communicate what the enhancement is and should be considered as
-part of any review.
-
-The YAML `title` should be lowercased and spaces/punctuation should be
-replaced with `-`.
-
-The `Metadata` section above is intended to support the creation of tooling
-around the enhancement process.
+# ComputeInstance Phase and Condition Expansion
 
 ## Summary
 
