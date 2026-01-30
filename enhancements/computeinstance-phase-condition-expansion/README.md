@@ -104,19 +104,19 @@ As VMaaS matures to support full VM lifecycle operations, users need clear visib
 This enhancement modifies the `ComputeInstance` status model across three layers:
 
 **1. OSAC Operator (Kubernetes CRD)**
-- Expand `ComputeInstancePhaseType` from 4 phases to 9 phases
-- Redesign `ComputeInstanceConditionType` to be orthogonal to phases
+- Expand `ComputeInstancePhaseType` from 4 phases to 8 phases
+- Refactor `ComputeInstanceConditionType` to be orthogonal to phases
 
 **2. Fulfillment API (Public protobuf)**
 - Add corresponding `ComputeInstanceState` enum values
 - Update `ComputeInstanceConditionType` enum to match the orthogonal design
-- Deprecate old values (`PROGRESSING`, `READY`) while maintaining backward compatibility
+- Remove old values (`PROGRESSING`, `READY`) since there are no external clients
 
 **3. Fulfillment Service (Private protobuf)**
 - Mirror public API changes
 - Fix RESTART/REBOOT terminology inconsistency
 
-**Proposed Phases (9):**
+**Proposed Phases (8):**
 
 | Phase | Description |
 |-------|-------------|
@@ -125,7 +125,6 @@ This enhancement modifies the `ComputeInstance` status model across three layers
 | `Running` | VM is running and operational |
 | `Stopping` | VM is powering off, guest OS shutting down |
 | `Stopped` | VM is powered off, resources retained |
-| `Pausing` | VM memory state is being saved |
 | `Paused` | VM is paused, memory preserved, no CPU allocated |
 | `Deleting` | VM is being permanently deleted |
 | `Failed` | VM encountered an error |
@@ -154,7 +153,7 @@ A tenant creates a ComputeInstance and observes its lifecycle through phases:
 3. **Boot completes**: VM is operational → Phase: `Running`
 4. **Stop requested**: Tenant stops the VM → Phase: `Stopping` → `Stopped`
 5. **Start requested**: Tenant starts the VM → Phase: `Starting` → `Running`
-6. **Pause requested**: Tenant pauses the VM → Phase: `Pausing` → `Paused`
+6. **Pause requested**: Tenant pauses the VM → Phase: `Paused`
 7. **Resume requested**: Tenant resumes the VM → Phase: `Running`
 8. **Delete requested**: Tenant deletes the VM → Phase: `Deleting` → (resource removed)
 
@@ -169,47 +168,111 @@ Restart is not a separate phase. When a tenant restarts a VM:
 **State Transition Diagram**
 
 ```
-[Create] → Pending → Starting → Running
-                                  │
-                ┌─────────────────┼─────────────────┐
-                ↓                 ↓                 ↓
-            Stopping          Pausing           Deleting
-                ↓                 ↓                 ↓
-            Stopped            Paused          (removed)
-                │                 │
-                └──→ Starting ←───┘
-                        ↓
-                     Running
+                              ┌─────────────────────────────────────────┐
+                              │                (start)                  │
+                              ▼                                         │
+[Create] ──► Pending ──► Starting ──► Running ──► Stopping ──► Stopped ─┘
+                                          │
+                                          │ (pause)
+                                          ▼
+                                       Paused
+                                          │
+                                          │ (resume)
+                                          ▼
+                                       Running
 
-[Any state] → Failed (on error)
-[Any state] → Deleting → (removed)
+[Any state] ──► Failed (on error)
+[Any state] ──► Deleting ──► (removed)
 ```
 
 ### API Extensions
 
-API Extensions are CRDs, admission and conversion webhooks, aggregated API servers,
-and finalizers, i.e. those mechanisms that change the OCP API surface and behaviour.
+This enhancement modifies existing API types rather than adding new CRDs or webhooks.
 
-- Name the API extensions this enhancement adds or modifies.
-- Does this enhancement modify the behaviour of existing resources, especially those owned
-  by other parties than the authoring team (including upstream resources), and, if yes, how?
-  Please add those other parties as reviewers to the enhancement.
+**Modified Resources:**
 
-  Examples:
-  - Adds a finalizer to namespaces. Namespace cannot be deleted without our controller running.
-  - Restricts the label format for objects to X.
-  - Defaults field Y on object kind Z.
+| Layer | Resource | Change |
+|-------|----------|--------|
+| OSAC Operator | `ComputeInstance` CRD | Expand `status.phase` values, refactor `status.conditions` |
+| Fulfillment API | `ComputeInstanceState` enum | Replace 4 values with 8 new phase values |
+| Fulfillment API | `ComputeInstanceConditionType` enum | Keep 3 conditions, remove 3, add 3 new |
+| Fulfillment Service | `ComputeInstanceState` enum | Mirror public API changes |
+| Fulfillment Service | `ComputeInstanceConditionType` enum | Mirror public API, rename REBOOT_* to RESTART_* |
 
-Fill in the operational impact of these API Extensions in the "Operational Aspects
-of API Extensions" section.
+**Condition Changes:**
+
+| Condition | Action | Notes |
+|-----------|--------|-------|
+| `DEGRADED` | Keep | No changes |
+| `RESTART_IN_PROGRESS` | Keep | Private API: rename from REBOOT_IN_PROGRESS |
+| `RESTART_FAILED` | Keep | Private API: rename from REBOOT_FAILED |
+| `PROGRESSING` | Remove | Phase now represents this |
+| `READY` | Remove | Replaced by `Available` |
+| `FAILED` | Remove | Phase now represents this |
+| `Provisioned` | New | Infrastructure resources are allocated |
+| `Available` | New | VM is ready for user workloads |
+| `ConfigurationApplied` | New | Desired configuration matches actual |
+
+**Behavioral Changes:**
+
+- `ComputeInstance.status.phase` will reflect VM power state (Running, Stopped, Paused) rather than reconciliation status
+- Conditions are orthogonal to phases - a condition like `Available` can be True or False independent of the phase
 
 ### Implementation Details/Notes/Constraints
 
-What are some important details that didn't come across above in the
-**Proposal**? Go in to as much detail as necessary here. This might be
-a good place to talk about core concepts and how they relate. While it is useful
-to go into the details of the code changes required, it is not necessary to show
-how the code will be rewritten in the enhancement.
+**Phase Determination Logic**
+
+The controller determines the ComputeInstance phase based on the KubeVirt `VirtualMachine.Status.PrintableStatus` and the `ComputeInstance.DeletionTimestamp`:
+
+| Condition | ComputeInstance Phase |
+|-----------|----------------------|
+| `DeletionTimestamp` is set | `Deleting` |
+| KubeVirt VM does not exist | `Pending` |
+| PrintableStatus = `Starting` | `Starting` |
+| PrintableStatus = `Running` AND VMI `Paused` condition = True | `Paused` |
+| PrintableStatus = `Running` | `Running` |
+| PrintableStatus = `Stopping` | `Stopping` |
+| PrintableStatus = `Stopped` | `Stopped` |
+| PrintableStatus = `ErrorUnschedulable` | `Failed` |
+
+> **Note:** KubeVirt does not have a transitional "Pausing" state. When a VM is paused, `PrintableStatus` remains "Running" but the VMI has a `Paused` condition set to `True`. The controller checks this condition to determine the `Paused` phase.
+
+**Condition Semantics by Phase**
+
+The following table shows the expected values of `Available` and `Degraded` conditions for each phase. These conditions are orthogonal to the phase - they represent the health and usability of the VM independent of its lifecycle state.
+
+| Phase | Available | Degraded | Description |
+|-------|-----------|----------|-------------|
+| `Pending` | False | False | VM is being provisioned, not yet usable |
+| `Starting` | False | False | VM is booting, not yet usable |
+| `Running` | True | False | VM is healthy and operational |
+| `Running` | True | True | VM is usable but has issues (e.g., performance degraded) |
+| `Running` | False | True | VM has issues preventing normal use |
+| `Stopping` | False | False | VM is shutting down |
+| `Stopped` | False | False | VM is powered off |
+| `Paused` | False | False | VM is paused, not usable until resumed |
+| `Deleting` | False | False | VM is being deleted |
+| `Failed` | False | False | VM encountered an unrecoverable error |
+
+**Key observations:**
+- `Available = True` only when phase is `Running` and the VM is usable
+- `Degraded = True` indicates issues, but the VM may still be usable (`Available = True`) or not (`Available = False`)
+- During transitional phases (`Starting`, `Stopping`, `Deleting`), both conditions are `False`
+- In terminal states (`Stopped`, `Paused`, `Failed`), both conditions are `False`
+
+**Files to Modify**
+
+| Repository | File | Changes |
+|------------|------|---------|
+| osac-operator | `api/v1alpha1/computeinstance_types.go` | Add new phase and condition constants |
+| osac-operator | `internal/controller/computeinstance_controller.go` | Update phase determination logic |
+| osac-operator | `internal/controller/computeinstance_feedback_controller.go` | Update phase-to-state mapping |
+| fulfillment-api | `proto/fulfillment/v1/compute_instance_type.proto` | Replace enum values |
+| fulfillment-service | `proto/private/v1/compute_instance_type.proto` | Replace enum values, rename REBOOT to RESTART |
+
+**Migration Approach**
+
+Since the product is in development with no external clients, old enum values (`PROGRESSING`, `READY`, `FAILED` for conditions) will be removed rather than deprecated. The controller will emit only the new phase and condition values.
 
 ### Risks and Mitigations
 
