@@ -22,7 +22,7 @@ The current 4-phase model (`Progressing`, `Ready`, `Failed`, `Deleting`) was des
 
 The redesign expands from 4 phases to 8 phases to properly represent the full VM lifecycle, aligning with industry standards from AWS, GCE, and KubeVirt. Conditions are redesigned to be orthogonal health indicators that complement, rather than duplicate, the lifecycle phase.
 
-> **Note:** You can find more details on industry standards [here](https://docs.google.com/document/d/1wgqAblnT7OHlT5bvaI4bi842kyeR3u4VfC_TAJXbGcI/edit?tab=t.oocbc3frwt7c). 
+> **Note:** You can find more details on industry standards [here](https://docs.google.com/document/d/1wgqAblnT7OHlT5bvaI4bi842kyeR3u4VfC_TAJXbGcI/edit?tab=t.oocbc3frwt7c).
 
 This change enables users to understand VM power state (running, stopped, paused), see transitional progress (starting, stopping), and receive clear health signals through conditions - providing the operational visibility expected from a modern cloud platform.
 
