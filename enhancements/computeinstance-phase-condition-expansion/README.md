@@ -36,7 +36,7 @@ As VMaaS matures to support full VM lifecycle operations, users need clear visib
 
 * As a tenant, I want to see if my VM is running, stopped, or paused, so that I understand its current power state
 * As a tenant, I want to see when my VM is starting or stopping, so that I know an operation is in progress
-* As a tenant, I want to see clear health indicators for my VM, so that I can identify issues without interpreting phase values
+* As a tenant, I want to see status conditions for my VM, so that I can understand its readiness and configuration state
 * As a tenant, I want to see when my VM is being deleted, so that I can track deletion progress and identify if resource removal fails
 * As a tenant, I want to know when my VM requires a restart for configuration changes to take effect, so that I can initiate a reboot when convenient
 
@@ -218,14 +218,24 @@ The controller determines the ComputeInstance phase based on the KubeVirt `Virtu
 
 **Available Condition Logic**
 
-The `Available` condition has a simple rule: it is `True` only when the VM is in the `Running` phase.
+The `Available` condition is set to `True` when `VirtualMachine.Status.Ready = true`. The `VirtualMachine.Status.Ready` field ([VirtualMachineStatus Ready](https://github.com/kubevirt/api/blob/fe5ef708bb5c1ed6ef155c4ad9ec1e7cfcb99500/core/v1/types.go#L2074-L2075)) is derived from the `VirtualMachineInstance.Conditions[Ready]` condition ([VirtualMachineInstanceConditionType Ready](https://github.com/kubevirt/api/blob/fe5ef708bb5c1ed6ef155c4ad9ec1e7cfcb99500/core/v1/types.go#L698-L700)). KubeVirt's virt-controller syncs VMI conditions to the VM object ([see vm.go](https://github.com/kubevirt/kubevirt/pull/6575)), and the VMI Ready condition is synced from the virt-launcher pod's Ready condition.
 
-| Phase | Available |
-|-------|-----------|
-| `Running` | True |
-| All other phases | False |
+| VirtualMachine.Status.Ready | Available |
+|----------------------------|-----------|
+| `true` | True |
+| `false` | False |
 
-This straightforward logic reflects that a VM is only "available for use" when it is actively running.
+**Timeline:** `VirtualMachine.Status.Ready` becomes `true` when `VirtualMachineInstance.Conditions[Ready] = True`, which is synced from the virt-launcher pod's Ready condition. The complete flow is:
+
+1. **QEMU process starts** → `VirtualMachineInstance.Phase` = `Running` ([VirtualMachineInstancePhase Running](https://github.com/kubevirt/api/blob/fe5ef708bb5c1ed6ef155c4ad9ec1e7cfcb99500/core/v1/types.go#L1104-L1105))
+2. **virt-launcher pod becomes ready** → Pod `Ready` condition = `True`
+3. **Pod Ready condition syncs to VMI** → `VirtualMachineInstance.Conditions[Ready]` = `True` ([VirtualMachineInstanceConditionType Ready](https://github.com/kubevirt/api/blob/fe5ef708bb5c1ed6ef155c4ad9ec1e7cfcb99500/core/v1/types.go#L698-L700)) - [synced by virt-handler](https://github.com/kubevirt/kubevirt/pull/1921)
+4. **VMI Ready condition syncs to VM** → `VirtualMachine.Status.Ready` = `true` ([VirtualMachineStatus Ready](https://github.com/kubevirt/api/blob/fe5ef708bb5c1ed6ef155c4ad9ec1e7cfcb99500/core/v1/types.go#L2074-L2075)) - [synced by virt-controller](https://github.com/kubevirt/kubevirt/pull/6575)
+5. **ComputeInstance controller observes VM Ready** → `ComputeInstance.Conditions[Available]` = `True`
+
+This means `Available = True` indicates that the VM infrastructure (virt-launcher pod ready, QEMU process running) is operational, but does not verify guest OS boot status.
+
+> **Note:** `Available = True` indicates VM infrastructure readiness but does not guarantee that the guest OS has fully booted or that applications inside the VM are ready to serve traffic.
 
 **RestartRequired Condition Logic**
 
@@ -293,6 +303,10 @@ We could add a `Pausing` phase to mirror the `Stopping` transitional phase.
 ## 5. Open Questions
 
 - **Should we add a Degraded condition?** The existing `DEGRADED` enum value in the API is never set. What signals from KubeVirt would indicate a VM is "degraded" (running but with issues) vs "failed" (not running)? The KubeVirt signals considered (CrashLoopBackOff, ErrorUnschedulable, etc.) mostly indicate failure rather than degradation.
+
+- **Should the Available condition capture whether the guest OS is ready and accessible (e.g., user can SSH into it)?** Currently, `Available = True` when `VirtualMachine.Status.Ready = true`, which indicates VM infrastructure (virt-launcher pod, QEMU process) is ready. This does not verify that the guest OS has booted or that SSH/applications are accessible. Should we redefine `Available` to represent guest-level readiness, or is infrastructure-level readiness the correct semantic?
+
+- **If Available should capture guest OS readiness, which mechanism should we use?** KubeVirt supports readiness probes (TCP socket for SSH access, or guest agent ping for OS responsiveness) that can verify guest-level readiness. The choice impacts operational complexity (VM image requirements) and the accuracy of readiness detection.
 
 ## 6. Test Plan
 
