@@ -239,7 +239,7 @@ This means `Available = True` indicates that the VM infrastructure (virt-launche
 
 **RestartRequired Condition Logic**
 
-The `RestartRequired` condition is derived from KubeVirt's `VirtualMachine.Status.Conditions` where `type = RestartRequired`. This condition is set by KubeVirt when configuration changes (such as adding or removing resources like CPUs, memory, or devices) have been applied to the VM spec but require a restart to take effect since they can't be live-propagated to the VMI. 
+The `RestartRequired` condition is derived from KubeVirt's `VirtualMachine.Status.Conditions` where `type = RestartRequired`. This condition is set by KubeVirt when configuration changes (such as adding or removing resources like CPUs, memory, or devices) have been applied to the VM spec but require a restart to take effect since they can't be live-propagated to the VMI.
 
 | KubeVirt VM Condition | RestartRequired |
 |-----------------------|-----------------|
