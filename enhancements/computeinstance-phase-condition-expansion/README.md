@@ -98,7 +98,7 @@ This enhancement modifies the `ComputeInstance` status model across three layers
 | Condition (CRD) | Condition (Protobuf) | Layer | Description |
 |-----------------|---------------------|-------|-------------|
 | `Provisioned` | `PROVISIONED` | CRD + API | Infrastructure resources (compute, storage) are allocated |
-| `Available` | `AVAILABLE` | CRD + API | VM is ready for user workloads |
+| `Available` | `AVAILABLE` | CRD + API | VM infrastructure is running and ready (does not indicate guest OS readiness) |
 | `ConfigurationApplied` | `CONFIGURATION_APPLIED` | CRD + API | Desired configuration matches actual |
 | `RestartRequired` | `RESTART_REQUIRED` | CRD + API | VM needs a restart for configuration changes to take effect |
 | — | `RESTART_IN_PROGRESS` | API only | Restart operation is in progress |
