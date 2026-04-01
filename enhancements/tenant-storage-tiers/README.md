@@ -3,7 +3,7 @@ title: tenant-storage-tiers
 authors:
   - akshaynadkarni
 creation-date: 2026-03-26
-last-updated: 2026-03-26
+last-updated: 2026-03-31
 tracking-link:
   - TBD
 see-also:
@@ -20,12 +20,18 @@ This proposal extends the tenant-specific StorageClass mechanism introduced in
 [tenant-specific-storageclasses](/enhancements/tenant-specific-storageclasses) to
 support multiple storage tiers per tenant. A CSP may need to offer different
 classes of storage to each tenant, for example fast NVMe storage for databases
-alongside slower HDD storage for archival. This proposal adds an optional
-`osac.openshift.io/storage-tier` label to StorageClasses, evolves
-`tenant.status.storageClass` (string) to `tenant.status.storageClasses` (list),
-and updates the `tenant_storage_class` Ansible role to accept a storage tier
-parameter so that consumers can select the appropriate StorageClass for a given
-workload.
+alongside slower HDD storage for archival. This proposal adds a **required**
+`osac.openshift.io/storage-tier` label to StorageClasses, introduces a new
+`tenant.status.storageClasses` list (replacing the singular
+`tenant.status.storageClass` field), and updates the `tenant_storage_class`
+Ansible role to **require** a storage tier parameter so that consumers
+explicitly select the appropriate StorageClass for a given workload.
+
+Since OSAC is pre-release with no deployed consumers, this proposal takes a
+clean-slate approach: tier labels are required (not optional), there is no
+implicit "Default" fallback, and the singular `status.storageClass` field is
+removed rather than deprecated. A migration path is provided for existing
+development and test environments.
 
 This proposal focuses on the infrastructure layer: tier labeling, resolution,
 and selection. How the tier value reaches the Ansible role (whether from a VM
@@ -57,10 +63,6 @@ the right storage tier for their workload type (e.g., a database template uses
 fast storage, an archival template uses standard storage) so that my users do
 not need to think about storage infrastructure.
 
-As a **CSP Admin**, I want the system to be backward compatible so that existing
-single-StorageClass-per-tenant configurations continue working without any
-changes.
-
 ### Goals
 
 * Enable CSPs to offer multiple storage tiers per tenant using labels on
@@ -68,11 +70,11 @@ changes.
 * Expose all resolved storage tiers in the Tenant status so that any consumer
   (VM templates, Ansible roles, future API fields) can select the appropriate
   StorageClass by tier.
-* Maintain full backward compatibility with the existing single StorageClass
-  per tenant model.
 * Keep the Tenant controller as the single source of truth for StorageClass
   resolution. Consumers (Ansible, CI controller) read from Tenant status, not
   from StorageClass labels directly.
+* Require all StorageClasses to declare their tier explicitly. No implicit
+  fallback behavior.
 
 ### Non-Goals
 
@@ -85,23 +87,27 @@ changes.
 * Prescribing the mechanism by which the tier value reaches the provisioning
   layer. This proposal builds the infrastructure; the consumption pattern
   (template-driven, user-facing, or hybrid) is discussed but not mandated.
+* Backward compatibility with the singular `status.storageClass` field. OSAC is
+  pre-release; see [Migration Path](#migration-path) for upgrade guidance.
 
 ## Proposal
 
-This proposal adds a second, optional label axis to the StorageClass labeling
-convention. The existing `osac.openshift.io/tenant` label identifies *which
-tenant* owns a StorageClass. The new `osac.openshift.io/storage-tier` label
-identifies *what kind* of storage it provides.
+This proposal adds a second label axis to the StorageClass labeling convention.
+The existing `osac.openshift.io/tenant` label identifies *which tenant* owns a
+StorageClass. The new `osac.openshift.io/storage-tier` label identifies *what
+kind* of storage it provides.
 
 Each StorageClass is identified by a composite key: `(tenant, storage-tier)`.
 The `tenant` axis retains its existing fallback behavior (tenant-specific, then
-shared `Default`). The `storage-tier` axis is an exact match that defaults to
-`Default` when absent.
+shared `Default`). The `storage-tier` axis is an exact match with no fallback:
+both labels are required on every StorageClass that participates in OSAC storage
+resolution.
 
-The `Default` sentinel value follows the same convention established for the
-`osac.openshift.io/tenant` label: real values are lowercase (`fast`,
-`standard`, `archival`), and the sentinel/fallback value is capitalized
-(`Default`). This keeps the labeling convention predictable across both axes.
+Tier names are freeform: CSPs choose values that make sense for their storage
+offering (e.g., `fast`, `standard`, `archival`, `default`). OSAC does not
+define a fixed vocabulary or treat any tier name as special. A CSP that wants a
+general-purpose tier can label it `default` (lowercase, by convention), but the
+controller does not assign it any magic behavior.
 
 ### Workflow Description
 
@@ -158,40 +164,7 @@ parameters:
 status. VM templates and provisioning roles can now select either `fast` or
 `standard` storage.
 
-#### Workflow 2: Backward-compatible single StorageClass (no storage-tier label)
-
-**Actors:** CSP Admin
-
-**Starting state:** The CSP has a single StorageClass per tenant, labeled with
-only `osac.openshift.io/tenant` (no `storage-tier` label). This is the
-configuration that exists today.
-
-1. The existing StorageClass has no `osac.openshift.io/storage-tier` label:
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: ceph-acme
-  labels:
-    osac.openshift.io/tenant: tenant-acme
-provisioner: rook-ceph.rbd.csi.ceph.com
-parameters:
-  pool: acme-pool
-```
-
-2. The Tenant controller treats the missing `storage-tier` label as
-   `storage-tier: Default`.
-
-3. `tenant.status.storageClasses` contains a single entry with
-   `storageTier: "Default"`. The backward-compatible
-   `tenant.status.storageClass` field also contains the StorageClass name.
-
-**Expected result:** The tenant continues to work exactly as before. No
-configuration changes are required. Consumers that do not specify a tier
-automatically use the `Default` tier.
-
-#### Workflow 3: CSP Admin configures shared Default storage tiers
+#### Workflow 2: CSP Admin configures storage tiers on shared Default StorageClasses
 
 **Actors:** CSP Admin
 
@@ -215,10 +188,10 @@ parameters:
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: ceph-shared-standard
+  name: ceph-shared-default
   labels:
     osac.openshift.io/tenant: Default
-    osac.openshift.io/storage-tier: standard
+    osac.openshift.io/storage-tier: default
 provisioner: rook-ceph.rbd.csi.ceph.com
 parameters:
   pool: shared-hdd-pool
@@ -231,18 +204,13 @@ parameters:
 **Expected result:** Tenants without dedicated storage still have access to
 tiered storage options through the shared Defaults.
 
-**Note:** A shared Default StorageClass without a `storage-tier` label is
-treated as `(tenant: Default, storage-tier: Default)`, following the same
-rule as Workflow 2. This is the configuration that exists today and continues
-to work without changes.
-
-#### Workflow 4: Mixed tenant-specific and shared Default tiers
+#### Workflow 3: Mixed tenant-specific and shared Default tiers
 
 **Actors:** CSP Admin
 
-**Starting state:** The CSP has a shared Default StorageClass (no tier label)
-for all tenants, and has configured tenant-specific `fast` and `slow`
-StorageClasses for `tenant-acme`.
+**Starting state:** The CSP has shared Default StorageClasses labeled with
+tiers, and has configured tenant-specific `fast` and `slow` StorageClasses
+for `tenant-acme`.
 
 StorageClasses on the cluster:
 
@@ -253,6 +221,7 @@ metadata:
   name: ceph-shared-default
   labels:
     osac.openshift.io/tenant: Default
+    osac.openshift.io/storage-tier: default
 provisioner: rook-ceph.rbd.csi.ceph.com
 parameters:
   pool: shared-pool
@@ -283,7 +252,7 @@ parameters:
 1. The Tenant controller resolves each tier independently for `tenant-acme`:
    - `fast`: tenant-specific SC found (`ceph-acme-fast`).
    - `slow`: tenant-specific SC found (`ceph-acme-slow`).
-   - `Default`: no tenant-specific SC without a tier label. Falls back to the
+   - `default`: no tenant-specific SC for this tier. Falls back to the
      shared Default SC (`ceph-shared-default`).
 
 2. The resulting Tenant status:
@@ -291,10 +260,9 @@ parameters:
 ```yaml
 status:
   phase: Ready
-  storageClass: "ceph-shared-default"
   storageClasses:
     - storageClassName: "ceph-shared-default"
-      storageTier: "Default"
+      storageTier: "default"
     - storageClassName: "ceph-acme-fast"
       storageTier: "fast"
     - storageClassName: "ceph-acme-slow"
@@ -302,15 +270,14 @@ status:
 ```
 
 **Expected result:** `tenant-acme` has three resolved tiers. The `fast` and
-`slow` tiers use tenant-specific StorageClasses. The `Default` tier falls back
-to the shared Default StorageClass. `status.storageClass` (singular) contains
-the shared Default SC name, so backward-compatible consumers continue to work.
+`slow` tiers use tenant-specific StorageClasses. The `default` tier falls back
+to the shared Default StorageClass.
 
-#### Workflow 5: Template-driven tier selection during provisioning (Strategy A)
+#### Workflow 4: Template-driven tier selection during provisioning
 
 **Actors:** Tenant Admin (creates the template), Tenant User (creates the CI)
 
-**Starting state:** `tenant-acme` has `fast` and `standard` tiers resolved.
+**Starting state:** `tenant-acme` has `fast` and `default` tiers resolved.
 The Tenant Admin has created a `database_vm` template that is configured to
 use `fast` storage for boot disks.
 
@@ -345,44 +312,12 @@ spec:
 template knew which tier to use for a database workload. The
 `tenant_storage_class` role resolved the tier to the correct StorageClass.
 
-#### Workflow 6: Default tier selection (no tier specified)
-
-**Actors:** Tenant User
-
-**Starting state:** `tenant-acme` has at least a `Default` tier resolved.
-
-1. The Tenant User creates a ComputeInstance using a generic template that does
-   not specify a storage tier:
-
-```yaml
-apiVersion: osac.openshift.io/v1alpha1
-kind: ComputeInstance
-metadata:
-  name: web-server-01
-spec:
-  templateID: osac.templates.ocp_virt_vm
-  cores: 2
-  memoryGiB: 4
-  bootDisk:
-    sizeGiB: 20
-  image:
-    sourceType: registry
-    sourceRef: "quay.io/containerdisks/fedora:latest"
-  runStrategy: Always
-```
-
-2. The `tenant_storage_class` role defaults to tier `"Default"` when no tier
-   is specified and resolves it from `tenant.status.storageClasses`.
-
-**Expected result:** All disks use the `Default` tier StorageClass. This is
-identical to the current single-StorageClass behavior.
-
-#### Workflow 7: Requested storage tier is not available
+#### Workflow 5: Requested storage tier is not available
 
 **Actors:** Tenant User (indirectly, via a template that requests an
 unavailable tier)
 
-**Starting state:** `tenant-acme` has only `Default` and `standard` tiers.
+**Starting state:** `tenant-acme` has `default` and `standard` tiers.
 A template requests `fast` storage.
 
 1. The `tenant_storage_class` role attempts to resolve tier `fast` from
@@ -390,36 +325,58 @@ A template requests `fast` storage.
 
 2. The role fails with a descriptive error:
 
+   > `tenant_storage_class_storage_tier` parameter is required.
    > Storage tier "fast" is not available for tenant "tenant-acme".
-   > Available tiers: Default, standard.
+   > Available tiers: default, standard.
 
 3. The ComputeInstance transitions to `Failed` with a descriptive message.
 
 **Expected result:** The provisioning fails with a clear error identifying the
 missing tier and listing the available alternatives.
 
+#### Workflow 6: Tier parameter not specified in template
+
+**Actors:** Tenant Admin (creates a template without specifying a tier)
+
+**Starting state:** `tenant-acme` has `fast` and `default` tiers resolved.
+
+1. A template invokes the `tenant_storage_class` role without setting
+   `tenant_storage_class_storage_tier`.
+
+2. The role fails immediately with:
+
+   > `tenant_storage_class_storage_tier` parameter is required.
+   > Available tiers for tenant "tenant-acme": default, fast.
+
+3. The ComputeInstance transitions to `Failed`.
+
+**Expected result:** The template author is forced to be explicit about which
+storage tier the workload needs. There is no silent fallback to a default tier.
+
 ### API Extensions
 
 #### StorageClass labels
 
-A new optional label is added alongside the existing tenant label:
+Both the tenant label and the storage-tier label are required on every
+StorageClass that participates in OSAC storage resolution. The Tenant
+controller ignores StorageClasses that are missing either label.
 
 | Label key | Required | Values | Default if absent |
 |---|---|---|---|
 | `osac.openshift.io/tenant` | Yes | `<tenantName>` or `Default` | N/A (required) |
-| `osac.openshift.io/storage-tier` | No | Lowercase Kubernetes label value (e.g., `fast`, `standard`, `archival`, `nvme-1`) | `Default` |
+| `osac.openshift.io/storage-tier` | Yes | Lowercase Kubernetes label value (e.g., `fast`, `standard`, `archival`, `nvme-1`, `default`) | N/A (required) |
 
-Both label axes use the same sentinel convention: real values are lowercase,
-and the sentinel/fallback value is `Default` (capitalized). This is consistent
-with the `osac.openshift.io/tenant: Default` convention established in the
-predecessor proposal, where capitalization prevents collisions with actual
-resource names (which are always lowercase in Kubernetes).
+The `osac.openshift.io/tenant` label retains the `Default` (capitalized)
+sentinel convention for shared StorageClasses. The `osac.openshift.io/tenant`
+axis is the only axis that uses a capitalized sentinel.
 
-Storage tier values are freeform. OSAC does not define a fixed vocabulary.
-CSPs choose tier names that make sense for their storage offering. Tier values
-must conform to Kubernetes label value syntax: alphanumeric, dashes, dots, and
-underscores, up to 63 characters, beginning and ending with an alphanumeric
-character.
+Storage tier values are freeform. OSAC does not define a fixed vocabulary or
+treat any tier name as special. CSPs choose tier names that make sense for
+their storage offering. Recommended conventions include `fast`, `standard`,
+`archival`, and `default`, but these are documentation guidance, not enforced
+constraints. Tier values must conform to Kubernetes label value syntax:
+alphanumeric, dashes, dots, and underscores, up to 63 characters, beginning
+and ending with an alphanumeric character.
 
 **Example: Tenant-specific StorageClass with a storage tier**
 
@@ -453,39 +410,24 @@ parameters:
   media: "hdd"
 ```
 
-**Example: StorageClass without a storage-tier label (treated as `Default`)**
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: netapp-tenant123
-  labels:
-    osac.openshift.io/tenant: tenant123
-provisioner: csi.trident.netapp.io
-parameters:
-  backendType: "ontap-nas"
-```
-
 #### Tenant CRD status changes
 
-The singular `status.storageClass` field (string) is retained for backward
-compatibility, and a new `status.storageClasses` list captures all resolved
-StorageClass mappings for the tenant:
+The singular `status.storageClass` field (string) is **removed** and replaced
+by a `status.storageClasses` list that captures all resolved StorageClass
+mappings for the tenant:
 
 ```yaml
 status:
   phase: Ready
   namespace: "tenant-acme-ns"
-  storageClass: "ceph-acme-default"       # Default tier (= storageClasses entry with storageTier: Default)
   storageClasses:
-    - storageClassName: "ceph-acme-default"    # tenant-specific
-      storageTier: "Default"
-    - storageClassName: "ceph-acme-fast"       # tenant-specific
+    - storageClassName: "ceph-acme-default"
+      storageTier: "default"
+    - storageClassName: "ceph-acme-fast"
       storageTier: "fast"
-    - storageClassName: "ceph-acme-standard"   # tenant-specific
+    - storageClassName: "ceph-acme-standard"
       storageTier: "standard"
-    - storageClassName: "ceph-shared-archival" # resolved from shared Default fallback
+    - storageClassName: "ceph-shared-archival"
       storageTier: "archival"
 ```
 
@@ -498,12 +440,11 @@ Go type:
 
 ```go
 type ResolvedStorageClass struct {
-    // StorageClassName is the name of the resolved StorageClass
+    // StorageClassName is the name of the resolved StorageClass.
     StorageClassName string `json:"storageClassName"`
 
-    // StorageTier is the storage tier this StorageClass provides.
-    // Set to "Default" when the StorageClass has no
-    // osac.openshift.io/storage-tier label.
+    // StorageTier is the storage tier this StorageClass provides,
+    // taken from the osac.openshift.io/storage-tier label.
     StorageTier string `json:"storageTier"`
 }
 ```
@@ -512,41 +453,35 @@ The `tenant` value is NOT included in `ResolvedStorageClass` because the Tenant
 CR itself is the tenant context. The tenant-to-Default fallback has already been
 applied by the time the resolved list is populated.
 
-**Backward compatibility:** The existing `status.storageClass` (string) field
-is kept as a convenience accessor for the `Default` tier. When a StorageClass
-resolves with tier `Default` (either explicitly labeled or with no tier label),
-`status.storageClass` contains its name. This allows consumers that are not yet
-tier-aware to continue working without changes.
-
-If no `Default` tier resolves for a tenant (neither a tenant-specific SC
-with `storage-tier: Default` or without a tier label, nor a shared Default SC
-with `storage-tier: Default` or without a tier label),
-`status.storageClass` will be empty, even if other tiers (`fast`, `standard`)
-resolved successfully. Consumers that are not tier-aware would fail in this
-case, which is the correct signal: the CSP must configure a `Default` tier
-(tenant-specific or shared) for backward compatibility. This edge case is
-related to Open Question #1 (whether the Tenant should require a `Default`
-tier to be `Ready`).
+The singular `status.storageClass` field is removed entirely. See
+[Migration Path](#migration-path) for upgrade guidance.
 
 ### Implementation Details/Notes/Constraints
 
 #### Resolution algorithm
 
 The Tenant controller resolves **all available tier combinations** for each
-tenant at reconciliation time. For each distinct `storage-tier` value `T` found
-across all StorageClasses labeled with `osac.openshift.io/tenant`:
+tenant at reconciliation time. The controller considers only StorageClasses
+labeled with `osac.openshift.io/tenant=<tenantName>` or
+`osac.openshift.io/tenant=Default`. StorageClasses belonging to other tenants
+are never visible.
+
+StorageClasses missing the `osac.openshift.io/storage-tier` label are ignored
+entirely and are not included in resolution.
+
+For each distinct `storage-tier` value `T` found across StorageClasses labeled
+with `osac.openshift.io/tenant=<tenantName>` or
+`osac.openshift.io/tenant=Default`:
 
 1. Find StorageClasses labeled `osac.openshift.io/tenant=<tenantName>` AND
-   `osac.openshift.io/storage-tier=T` (or no `storage-tier` label when
-   `T` is `Default`).
+   `osac.openshift.io/storage-tier=T`.
    - Exactly one: use it.
    - More than one: duplicate error for this tier (same as the existing
      behavior for the single-tier case).
    - None: proceed to step 2.
 
 2. Find StorageClasses labeled `osac.openshift.io/tenant=Default` AND
-   `osac.openshift.io/storage-tier=T` (or no `storage-tier` label when
-   `T` is `Default`).
+   `osac.openshift.io/storage-tier=T`.
    - Exactly one: use it (shared Default fallback for this tier).
    - More than one: duplicate error for this tier.
    - None: tier `T` is not available for this tenant (not an error at
@@ -559,18 +494,21 @@ the pre-resolved list.
 
 #### Tier selection at provisioning time
 
-The `tenant_storage_class` Ansible role is the selection interface. It accepts
-a `storage_tier` input parameter (defaulting to `"Default"`) and resolves it
-against the tenant's `status.storageClasses` list.
+The `tenant_storage_class` Ansible role is the selection interface. It
+**requires** a `tenant_storage_class_storage_tier` input parameter (no default
+value) and resolves it against the tenant's `status.storageClasses` list.
+
+If the parameter is not provided, the role fails immediately with a descriptive
+error listing the available tiers for the tenant. This forces template authors
+to be explicit about which storage tier their workload needs.
 
 **Who provides the `storage_tier` value** is a separate concern from how the
-role resolves it. This proposal identifies three strategies:
-
-**Strategy A: Template-driven (recommended initial approach).** The VM template
-role (e.g., `osac.templates.database_vm`) hardcodes which tier each disk needs.
-The template author chooses the tier based on the workload type. The tenant
-user selects a template when creating a ComputeInstance and does not need to
-know about storage tiers.
+role resolves it. The initial implementation uses **Strategy A:
+template-driven** selection. The VM template role (e.g.,
+`osac.templates.database_vm`) hardcodes which tier each disk needs. The
+template author chooses the tier based on the workload type. The tenant user
+selects a template when creating a ComputeInstance and does not need to know
+about storage tiers.
 
 ```yaml
 # Inside osac.templates.database_vm/tasks/create.yaml
@@ -581,26 +519,21 @@ know about storage tiers.
     tenant_storage_class_storage_tier: "fast"
 ```
 
-**Strategy B: User-facing DiskSpec field.** A `storageTier` field is added to
-the ComputeInstance `DiskSpec`. The CI controller or Ansible role reads the
-field from the CI spec and passes it to the `tenant_storage_class` role. This
-gives users direct control over storage selection but exposes infrastructure
-details.
-
-**Strategy C: Hybrid.** The template sets a default tier, and a user-facing
-field can override it. This provides flexibility while keeping the common case
-simple.
-
-All three strategies use the same underlying infrastructure: the
-`tenant_storage_class` role receives a `storage_tier` parameter and resolves it
-from `tenant.status.storageClasses`. The initial implementation targets
-Strategy A.
+If user-specified tiers are needed in the future, Strategy B (a `storageTier`
+field on the ComputeInstance `DiskSpec`) or Strategy C (hybrid: template
+default, user override) can be added as a separate enhancement. These
+strategies would require proto changes, fulfillment-service updates, and API
+versioning.
 
 #### StorageClassReady condition updates
 
 The existing `StorageClassReady` condition is extended:
 
 - `Ready` requires at least one tier to resolve successfully.
+- If **no tier resolves successfully** (all have duplicates,
+  MultipleDefaultsFound, or are not found), the Tenant `phase` is set to
+  `Progressing` and the `StorageClassReady` condition is `False` with a
+  message listing all tier resolution failures.
 - Duplicate detection applies per tier. Two StorageClasses for `(tenantX,
   fast)` produces a `MultipleFound` condition, but does not affect
   `(tenantX, standard)`.
@@ -613,16 +546,13 @@ The `tenant_storage_class` role currently reads `tenant.status.storageClass`
 (a single string) and sets `tenant_storage_class_name`. It will be updated to:
 
 1. Read `tenant.status.storageClasses` (the resolved list).
-2. Accept a `tenant_storage_class_storage_tier` input parameter (defaulting to
-   `"Default"`).
+2. **Require** the `tenant_storage_class_storage_tier` input parameter (no
+   default value). Fail immediately if the parameter is not provided, with an
+   error message listing available tiers.
 3. Find the entry in the list whose `storageTier` matches the request.
 4. Set `tenant_storage_class_name` to the matching `storageClassName`.
 5. Fail with a descriptive error if the requested tier is not in the list,
    including the available tiers.
-
-For backward compatibility, if `tenant.status.storageClasses` is not present
-(older Tenant controller), the role falls back to reading
-`tenant.status.storageClass` and treats it as the `Default` tier.
 
 #### Changes per repository
 
@@ -630,22 +560,24 @@ For backward compatibility, if `tenant.status.storageClasses` is not present
 
 - Evolve `getTenantStorageClass()` to `getTenantStorageClasses()`: group
   StorageClasses by `(tenant, storage-tier)` combination and resolve each
-  independently.
+  independently. Ignore StorageClasses missing the `storage-tier` label.
 - Add `ResolvedStorageClass` Go type to the Tenant CRD API.
-- Add `tenant.status.storageClasses` (list of `ResolvedStorageClass`). Keep
-  `status.storageClass` as a convenience field for the `Default` tier.
+- Add `tenant.status.storageClasses` (list of `ResolvedStorageClass`).
+- Remove `status.storageClass` (singular) from the Tenant CRD API.
 - Update `StorageClassReady` condition with per-tier resolution detail.
 - Update unit tests for multi-tier scenarios (multiple tiers resolved,
   duplicate within one tier, missing tier, fallback to shared Default per
-  tier).
+  tier, StorageClass without tier label is ignored).
 
 **osac-aap:**
 
 - Update `tenant_storage_class` role to read `tenant.status.storageClasses`
-  and accept a `tenant_storage_class_storage_tier` input parameter.
-- Update template roles to pass the appropriate tier to
+  and **require** a `tenant_storage_class_storage_tier` input parameter (no
+  default).
+- Update all template roles to explicitly pass the appropriate tier to
   `tenant_storage_class` when invoking it.
-- Update tests for tier-aware lookup.
+- Update tests for tier-aware lookup and for the missing-parameter failure
+  case.
 
 **fulfillment-service:**
 
@@ -663,16 +595,16 @@ For backward compatibility, if `tenant.status.storageClasses` is not present
 making the Tenant status large and hard to reason about.
 
 **Mitigation:** Documentation will recommend a small, well-defined set of tiers
-(e.g., `fast`, `standard`, `archival`). The system does not enforce a fixed
-vocabulary, but operational guidance will discourage excessive granularity.
+(e.g., `fast`, `standard`, `archival`, `default`). The system does not enforce
+a fixed vocabulary, but operational guidance will discourage excessive
+granularity.
 
-**Risk: Backward compatibility during upgrade.** Existing deployments have
-`tenant.status.storageClass` (string). If the field is removed, consumers
-that have not been updated will break.
+**Risk: Breaking change for existing dev/test environments.** Existing
+StorageClasses may lack the `storage-tier` label, and existing code may read
+`status.storageClass` (singular).
 
-**Mitigation:** The singular `status.storageClass` field is retained as a
-convenience accessor that points to the `Default` tier. Consumers are migrated
-to read from `status.storageClasses` but are not immediately broken.
+**Mitigation:** OSAC is pre-release with no production deployments. A one-time
+migration is documented in the [Migration Path](#migration-path) section.
 
 **Risk: Duplicate detection complexity.** With multiple tiers, the number of
 potential duplicate scenarios increases.
@@ -683,12 +615,138 @@ each resolution step.
 
 ### Drawbacks
 
-This design adds a dimension of complexity to the StorageClass selection
-process. For CSPs that only need a single StorageClass per tenant, the new
-`storage-tier` label is unnecessary overhead. The backward-compatible defaults
-(omitted label = `Default` tier, omitted parameter = `Default` tier) ensure
-these CSPs are not burdened by the feature, but the Tenant controller must
-still handle the multi-tier resolution path.
+This design introduces a breaking change to the Tenant CRD status API. The
+singular `status.storageClass` field is removed and all StorageClasses must
+carry a `storage-tier` label. For CSPs that only need a single StorageClass per
+tenant, the required `storage-tier` label is additional configuration overhead.
+However, the label is a single key-value pair, and the explicit-over-implicit
+approach prevents the ambiguity that an optional label with a magic fallback
+would create.
+
+## Migration Path
+
+This section describes the one-time migration from the current single-tier
+system to the multi-tier system. OSAC is pre-release with no production
+deployments, so this migration applies only to development and test
+environments.
+
+### Step 1: Label existing StorageClasses
+
+Add the `osac.openshift.io/storage-tier` label to every existing StorageClass
+that has an `osac.openshift.io/tenant` label. For StorageClasses that serve as
+the general-purpose tier, use the conventional value `default`:
+
+```bash
+# Find all OSAC-managed StorageClasses and add the tier label
+for sc in $(oc get storageclass -l osac.openshift.io/tenant \
+  -o jsonpath='{.items[*].metadata.name}'); do
+  oc label storageclass "$sc" osac.openshift.io/storage-tier=default
+done
+```
+
+After this step, the Tenant controller will include these StorageClasses in its
+resolution. Before this step, the updated controller ignores them (missing
+required label).
+
+### Step 2: Update osac-operator
+
+Deploy the updated osac-operator that:
+
+- Requires the `osac.openshift.io/storage-tier` label on all StorageClasses.
+- Populates `tenant.status.storageClasses` (list).
+- No longer populates `tenant.status.storageClass` (singular).
+
+After the operator is updated and the StorageClasses are labeled, the Tenant
+status will contain the new `storageClasses` list.
+
+### Step 3: Update osac-aap
+
+Deploy the updated osac-aap that:
+
+- Reads `tenant.status.storageClasses` instead of `tenant.status.storageClass`.
+- Requires `tenant_storage_class_storage_tier` on all role invocations.
+
+All template roles must be updated to pass `tenant_storage_class_storage_tier`
+explicitly (e.g., `default` for general-purpose templates, `fast` for database
+templates).
+
+### Step 4: Remove the singular field from the CRD
+
+Once all consumers have been updated, the `status.storageClass` field can be
+removed from the CRD schema. Since osac-operator and osac-aap are deployed
+together in practice, Steps 2-4 can be combined into a single deployment.
+
+### Ordering
+
+Steps 1 and 2 can be applied in either order. If the operator is updated first,
+existing StorageClasses without tier labels will be ignored until they are
+labeled. If StorageClasses are labeled first, the old operator will ignore the
+new label (it does not read it).
+
+The recommended order is: label StorageClasses (Step 1), then deploy the
+updated operator and AAP together (Steps 2-4).
+
+## Design Decisions
+
+The following questions were raised during review and resolved before this
+proposal was finalized.
+
+### 1. Should the Tenant require a `default` tier to be Ready?
+
+**Decision: No.** The only requirement is that at least one tier resolves
+successfully. Which tier(s) exist is the CSP's choice.
+
+**Rationale:** Requiring a specific tier name couples the controller to naming
+conventions. A CSP that only provides specialized tiers (`fast`, `gpu`) should
+not be forced to also create a `default` tier. Templates must specify which
+tier they need; there are no assumptions about which tiers exist.
+
+### 2. Should tier names be validated against a predefined vocabulary?
+
+**Decision: No. Tier names are freeform.** Values must follow Kubernetes label
+syntax, but OSAC does not enforce a fixed list.
+
+**Rationale:** Different CSPs have different storage offerings. Hardcoding tier
+names in the controller is inflexible and would require controller updates as
+storage technology evolves (e.g., `nvme-gen5`, `persistent-memory`). Instead,
+the proposal documents recommended conventions (`fast`, `standard`, `archival`,
+`default`) without enforcing them.
+
+### 3. Should tenant users be able to specify storage tiers?
+
+**Decision: Start with Strategy A (template-driven) only.** Templates encode
+the storage requirement. Users select templates based on workload type, not
+infrastructure details.
+
+**Rationale:** Templates are the right abstraction layer for storage decisions.
+A `database_vm` template knows it needs `fast` storage; a user does not need to
+think about it. Adding user-specified tiers (Strategy B/C) introduces
+complexity: proto changes, fulfillment-service updates, API versioning, and two
+paths to the same outcome. If tenant feedback shows a need for user-specified
+tiers, Strategy C (hybrid: template default, user override) can be added as a
+future enhancement.
+
+### 4. Should `status.storageClass` (singular) be deprecated or removed?
+
+**Decision: Removed.** The field is deleted from the CRD, not deprecated.
+
+**Rationale:** OSAC is pre-release with zero deployed consumers. Retaining a
+deprecated field perpetuates the idea that a single tier is special and creates
+permanent API surface that is unlikely to ever be removed. A clean break is
+simpler and aligns with the explicit-tier-selection philosophy. See
+[Migration Path](#migration-path) for upgrade guidance.
+
+### 5. Should the `storage-tier` label be required or optional?
+
+**Decision: Required.** The Tenant controller ignores StorageClasses missing
+the `osac.openshift.io/storage-tier` label.
+
+**Rationale:** An optional label with an implicit "Default" fallback creates
+ambiguity: is `Default` a real tier name or an internal sentinel? Making the
+label required eliminates this confusion. CSPs that want a general-purpose tier
+label it `default` (lowercase, by convention), but the controller assigns no
+magic behavior to any tier name. Since OSAC is pre-release, there is no
+backward-compatibility cost to making this required.
 
 ## Alternatives (Not Implemented)
 
@@ -702,26 +760,25 @@ instead of a list of structs. This was considered but rejected because:
 - Kubernetes CRD validation works better with lists than with maps of
   arbitrary keys.
 
-## Open Questions
+**Alternative 2: Optional storage-tier label with implicit "Default" fallback.**
+The original proposal made the `storage-tier` label optional, with missing
+labels treated as a capitalized `Default` sentinel. This was rejected during
+review because:
 
-1. Should the Tenant require a `Default` tier to be `Ready`, or is it
-   sufficient to have any tier resolve? If a tenant only has `fast` storage
-   and a template requests `Default`, should the system error?
+- The capitalized `Default` sentinel creates confusion: is it a real tier name
+  or an internal marker?
+- Implicit fallback behavior is harder to reason about and debug.
+- OSAC is pre-release, so backward compatibility is not a constraint.
+- Making the label required eliminates an entire class of ambiguity.
 
-2. Should tier names be validated against a predefined vocabulary, or remain
-   freeform? Freeform is more flexible but risks inconsistency across tenants.
+**Alternative 3: Deprecate `status.storageClass` instead of removing it.** The
+singular field could be deprecated and retained for backward compatibility.
+This was rejected because:
 
-3. **Should tenant users be able to specify storage tiers?** In Strategy A,
-   the template author (Tenant Admin) decides which tier each disk uses and
-   the user has no control. If user-specified tiers are desired, there are
-   two mechanisms: a configurable template that reads the tier from
-   `templateParameters`, or a dedicated `storageTier` field on the
-   ComputeInstance `DiskSpec` (Strategy B). Both achieve the same result
-   (user provides the tier value), but differ in scope: a template parameter
-   is scoped to templates that opt in, while a DiskSpec field is available
-   on every ComputeInstance. If Strategy B is adopted, the proto/public API
-   would also need a `storage_tier` field, requiring buf regeneration and
-   fulfillment-service proto updates.
+- OSAC is pre-release with zero deployed consumers reading this field.
+- Retaining the field perpetuates the idea that a single "default" tier is
+  special, contradicting the explicit-tier-selection philosophy.
+- A deprecated field that is never removed becomes permanent API surface.
 
 ## Test Plan
 
@@ -729,18 +786,21 @@ instead of a list of structs. This was considered but rejected because:
 
 - Tenant controller: resolve multiple tiers per tenant, duplicate detection
   per tier, fallback to shared Default per tier, mixed (some tiers from tenant,
-  some from Default), backward-compatible single SC with no tier label.
+  some from Default).
+- StorageClass without `storage-tier` label is ignored entirely.
 - Verify `status.storageClasses` list is populated correctly.
-- Verify `status.storageClass` (singular) still contains the `Default` tier.
+- Verify `status.storageClass` (singular) is NOT populated.
+- All tiers fail to resolve: Tenant is Progressing, StorageClassReady is
+  False with message listing all failures.
 
 **Unit tests (osac-aap):**
 
 - `tenant_storage_class` role with `tenant_storage_class_storage_tier`
-  parameter: resolve `fast` tier, resolve `Default` tier, resolve when no
-  tier parameter is provided (defaults to `Default`), fail when requested
-  tier is not in the list (verify error message includes available tiers),
-  backward-compatible fallback to `status.storageClass` when
-  `status.storageClasses` is absent.
+  parameter: resolve `fast` tier, resolve `default` tier.
+- Fail when `tenant_storage_class_storage_tier` is not provided (verify error
+  message includes available tiers).
+- Fail when requested tier is not in the list (verify error message includes
+  available tiers).
 
 **E2E tests:**
 
@@ -748,16 +808,29 @@ instead of a list of structs. This was considered but rejected because:
   Tenant status.
 - Template requests `fast` tier: verify the DataVolume uses the `fast`
   StorageClass.
-- Template requests no tier (Default): verify the DataVolume uses the
-  `Default` StorageClass.
+- Template requests `default` tier: verify the DataVolume uses the `default`
+  StorageClass.
 - Shared Default fallback per tier: tenant has no dedicated `fast` SC, verify
   the shared Default `fast` SC is used.
 - Tier not available: template requests `fast` but only `standard` is
   configured. Verify descriptive error with available tier list.
-- Backward compatibility: existing single-SC tenant (no `storage-tier` label)
-  continues to work without any changes.
 - Duplicate detection per tier: two SCs for `(tenantX, fast)` produces
   `MultipleFound` for that tier, but `(tenantX, standard)` is unaffected.
+- StorageClass without tier label: verify it is ignored by the controller.
+- All tiers fail: verify Tenant is Progressing with StorageClassReady=False.
+
+**Upgrade scenario test:**
+
+- Deploy Tenant with the old controller (single SC, no tier label,
+  `status.storageClass` populated).
+- Label the existing StorageClass with `osac.openshift.io/storage-tier=default`.
+- Upgrade to the new controller.
+- Verify:
+  - `status.storageClasses` (list) is populated with one entry:
+    `{storageClassName: "...", storageTier: "default"}`.
+  - `status.storageClass` (singular) is no longer present.
+  - Templates updated to pass `tenant_storage_class_storage_tier: "default"`
+    continue to provision successfully.
 
 ## Graduation Criteria
 
@@ -766,17 +839,9 @@ Initial implementation targets Dev Preview.
 
 ## Upgrade / Downgrade Strategy
 
-**Upgrade from single-tier to multi-tier:**
-
-- Existing StorageClasses without the `osac.openshift.io/storage-tier` label
-  continue to work. The Tenant controller treats them as tier `Default`.
-- Existing `tenant.status.storageClass` (string) is retained for backward
-  compatibility. Consumers that read the old field continue to get the
-  `Default` tier StorageClass name.
-- The new `tenant.status.storageClasses` (list) is additive. Old consumers
-  that do not read it are unaffected.
-- Templates and roles that do not specify a tier parameter continue to use
-  the `Default` tier.
+See [Migration Path](#migration-path) for upgrade guidance. Since OSAC is
+pre-release, there is no downgrade path. The migration is a one-time breaking
+change applied during development.
 
 ## Version Skew Strategy
 
