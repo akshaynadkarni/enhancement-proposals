@@ -374,7 +374,8 @@ Storage tier values are freeform. OSAC does not define a fixed vocabulary or
 treat any tier name as special. CSPs choose tier names that make sense for
 their storage offering. Recommended conventions include `fast`, `standard`,
 `archival`, and `default`, but these are documentation guidance, not enforced
-constraints. Tier values must conform to Kubernetes label value syntax:
+constraints. Tier values must be lowercase and conform to Kubernetes label
+value syntax:
 alphanumeric, dashes, dots, and underscores, up to 63 characters, beginning
 and ending with an alphanumeric character.
 
