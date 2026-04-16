@@ -98,10 +98,12 @@ StorageClass. The new `osac.openshift.io/storage-tier` label identifies *what
 kind* of storage it provides.
 
 Each StorageClass is identified by a composite key: `(tenant, storage-tier)`.
-The `tenant` axis retains its existing fallback behavior (tenant-specific, then
-shared `Default`). The `storage-tier` axis is an exact match with no fallback:
-both labels are required on every StorageClass that participates in OSAC storage
-resolution.
+The two axes have different resolution rules. The `tenant` axis retains its
+existing fallback behavior (tenant-specific, then shared `Default`), and this
+fallback is applied independently per tier. The `storage-tier` axis is an exact
+match with no inter-tier fallback: a request for tier `fast` never silently
+resolves to `standard`. Both labels are required on every StorageClass that
+participates in OSAC storage resolution.
 
 Tier names are freeform: CSPs choose values that make sense for their storage
 offering (e.g., `fast`, `standard`, `archival`, `default`). OSAC does not
@@ -361,10 +363,10 @@ Both the tenant label and the storage-tier label are required on every
 StorageClass that participates in OSAC storage resolution. The Tenant
 controller ignores StorageClasses that are missing either label.
 
-| Label key | Required | Values | Default if absent |
+| Label key | Required | Values | Behavior when absent |
 |---|---|---|---|
-| `osac.openshift.io/tenant` | Yes | `<tenantName>` or `Default` | N/A (required) |
-| `osac.openshift.io/storage-tier` | Yes | Lowercase Kubernetes label value (e.g., `fast`, `standard`, `archival`, `nvme-1`, `default`) | N/A (required) |
+| `osac.openshift.io/tenant` | Yes | `<tenantName>` or `Default` | StorageClass ignored |
+| `osac.openshift.io/storage-tier` | Yes | Lowercase Kubernetes label value (e.g., `fast`, `standard`, `archival`, `nvme-1`, `default`) | StorageClass ignored |
 
 The `osac.openshift.io/tenant` label retains the `Default` (capitalized)
 sentinel convention for shared StorageClasses. The `osac.openshift.io/tenant`
@@ -442,10 +444,16 @@ Go type:
 ```go
 type ResolvedStorageClass struct {
     // StorageClassName is the name of the resolved StorageClass.
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:MinLength=1
     StorageClassName string `json:"storageClassName"`
 
     // StorageTier is the storage tier this StorageClass provides,
     // taken from the osac.openshift.io/storage-tier label.
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:MinLength=1
+    // +kubebuilder:validation:MaxLength=63
+    // +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
     StorageTier string `json:"storageTier"`
 }
 ```
@@ -635,12 +643,17 @@ environments.
 
 Add the `osac.openshift.io/storage-tier` label to every existing StorageClass
 that has an `osac.openshift.io/tenant` label. For StorageClasses that serve as
-the general-purpose tier, use the conventional value `default`:
+the general-purpose tier, use the conventional value `default`.
+
+The script below only labels StorageClasses that do not already have a
+`storage-tier` label, so it is safe to run multiple times:
 
 ```bash
-# Find all OSAC-managed StorageClasses and add the tier label
-for sc in $(oc get storageclass -l osac.openshift.io/tenant \
+# Label OSAC-managed StorageClasses that are missing a storage-tier label
+for sc in $(oc get storageclass \
+  -l osac.openshift.io/tenant,\!osac.openshift.io/storage-tier \
   -o jsonpath='{.items[*].metadata.name}'); do
+  echo "Labeling $sc with storage-tier=default"
   oc label storageclass "$sc" osac.openshift.io/storage-tier=default
 done
 ```
