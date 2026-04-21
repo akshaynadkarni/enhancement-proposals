@@ -71,8 +71,9 @@ not need to think about storage infrastructure.
   (VM templates, Ansible roles, future API fields) can select the appropriate
   StorageClass by tier.
 * Keep the Tenant controller as the single source of truth for StorageClass
-  resolution. Consumers (Ansible, CI controller) read from Tenant status, not
-  from StorageClass labels directly.
+  resolution, so that osac-operator and osac-aap do not each implement the
+  same resolution logic. Consumers use `status.storageClasses` to determine
+  which StorageClass to use for a given tier.
 * Require all StorageClasses to declare their tier explicitly. No implicit
   fallback behavior.
 
