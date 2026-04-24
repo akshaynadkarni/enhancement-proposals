@@ -144,13 +144,12 @@ resolves to `standard`. Both labels are required on every StorageClass that
 participates in OSAC storage resolution.
 
 Tier names are freeform: CSPs choose values that make sense for their storage
-offering (e.g., `fast`, `standard`, `archival`, `default`). OSAC does not
-define a fixed vocabulary or treat any tier name as special. A CSP that wants a
-general-purpose tier can label it `default` (lowercase, by convention), but the
-controller does not assign it any magic behavior. OSAC-shipped templates use
-the tier name `default` so they work on any deployment without customization.
-A shared StorageClass with `tenant: Default` and `storage-tier: default` is
-expected on every VMaaS cluster.
+offering (e.g., `fast`, `standard`, `archival`, `default`). The controller does
+not enforce a fixed vocabulary. However, OSAC-shipped templates depend on the
+tier name `default`, so a shared StorageClass with
+`osac.openshift.io/tenant: Default` and
+`osac.openshift.io/storage-tier: default` is required on every VMaaS cluster
+for these templates to work without customization.
 
 ### Workflow Description
 
@@ -413,13 +412,12 @@ The `osac.openshift.io/tenant` label retains the `Default` (capitalized)
 sentinel convention for shared StorageClasses. The `osac.openshift.io/tenant`
 axis is the only axis that uses a capitalized sentinel.
 
-Storage tier values are currently freeform. OSAC does not define a fixed
-vocabulary or treat any tier name as special. CSPs choose tier names that make
-sense for their storage offering. Recommended conventions include `fast`,
-`standard`, `archival`, and `default`, but these are documentation guidance,
-not enforced constraints. However, OSAC-shipped templates rely on the tier name
-`default`; a shared StorageClass with `tenant: Default, storage-tier: default`
-is expected on every VMaaS cluster for these templates to work out of the box.
+Storage tier values are freeform beyond the `default` convention. CSPs choose
+tier names that make sense for their storage offering. Recommended conventions
+include `fast`, `standard`, and `archival`, but these are not enforced. The
+tier name `default` is required for OSAC-shipped templates to work out of the
+box; a shared StorageClass with `tenant: Default, storage-tier: default` must
+exist on every VMaaS cluster.
 As noted in [Assumptions](#assumptions), an external
 system will own the source of truth for valid tier names. A future proposal
 addressing tier discovery and StorageClass lifecycle management may introduce
@@ -816,16 +814,19 @@ proposal was finalized.
 **Decision: No.** The only requirement is that at least one tier resolves
 successfully. Which tier(s) exist is the CSP's choice.
 
-**Rationale:** Requiring a specific tier name couples the controller to naming
-conventions. A CSP that only provides specialized tiers (`fast`, `gpu`) should
-not be forced to also create a `default` tier. Templates must specify which
-tier they need; there are no assumptions about which tiers exist.
+**Rationale:** Requiring a specific tier name for the Tenant to reach Ready
+couples the controller to naming conventions. The controller only cares that
+at least one tier resolves. However, OSAC-shipped templates depend on a
+`default` tier existing (see Decision #6), so in practice CSPs should ensure
+a `default` tier is available if they want those templates to work out of the
+box.
 
 ### 2. Should tier names be validated against a predefined vocabulary?
 
 **Decision: No, for now. Tier names are freeform.** Values must follow
 Kubernetes label value syntax, but OSAC does not enforce a fixed list in this
-proposal.
+proposal. The one convention that OSAC-shipped templates depend on is the tier
+name `default` (see Decision #6).
 
 **Rationale:** Different CSPs have different storage offerings. Hardcoding tier
 names in the controller is inflexible and would require controller updates as
@@ -873,6 +874,24 @@ label required eliminates this confusion. CSPs that want a general-purpose tier
 label it `default` (lowercase, by convention), but the controller assigns no
 magic behavior to any tier name. Since OSAC is pre-release, there is no
 backward-compatibility cost to making this required.
+
+### 6. Should OSAC require a `default` tier for shipped templates to work?
+
+**Decision: Yes.** A shared StorageClass with
+`osac.openshift.io/tenant: Default` and
+`osac.openshift.io/storage-tier: default` is required on every VMaaS cluster.
+
+**Rationale:** OSAC contributors write base templates that must work out of the
+box on any OSAC deployment. Since tier names are freeform and CSPs choose their
+own, templates cannot hardcode CSP-specific tier names. By convention,
+OSAC-shipped templates use the tier name `default`. Requiring a shared
+StorageClass with `tenant: Default, storage-tier: default` ensures every tenant
+resolves a `default` tier through the shared Default fallback, making
+OSAC-shipped templates portable across deployments. CSPs can override it
+per-tenant and customize templates for specialized tiers. The Tenant controller
+itself does not enforce this; it only requires at least one tier to resolve
+(see Decision #1). The `default` tier requirement is an operational convention
+for template portability, not a controller-level constraint.
 
 ## Alternatives (Not Implemented)
 
